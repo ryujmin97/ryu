@@ -1224,6 +1224,11 @@ window.addEventListener("popstate", async (ev) => {
     return;
   }
 
+  if (st.page === "logs") {
+    showPage("logs", false);
+    return;
+  }
+
   if (st.page === "branch") {
     showPage("branch", false);
     if (!BRANCHES || !BRANCHES.length) {

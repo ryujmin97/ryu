@@ -1,7 +1,7 @@
 from aiohttp import web
 
 from .core import log_mw, on_startup, on_cleanup, WEB_DIR
-from . import routes_static, routes_api, routes_ws
+from . import routes_static, routes_api, routes_ws, routes_logs
 
 
 def make_app() -> web.Application:
@@ -28,6 +28,14 @@ def make_app() -> web.Application:
   app.router.add_get("/api/heartbeat_status", routes_api.api_heartbeat_status)
   app.router.add_post("/api/time_sync", routes_api.api_time_sync)
   app.router.add_post("/stream", routes_api.proxy_stream)
+
+  # logs (dashcam / screenrecord — video & log download)
+  app.router.add_get("/api/dashcam/routes", routes_logs.api_dashcam_routes)
+  app.router.add_get("/api/dashcam/segments/{route}", routes_logs.api_dashcam_segments)
+  app.router.add_get("/api/dashcam/download/{segment}/{kind}", routes_logs.api_dashcam_download)
+  app.router.add_post("/api/dashcam/download_zip", routes_logs.api_dashcam_download_zip)
+  app.router.add_get("/api/screenrecord/videos", routes_logs.api_screenrecord_videos)
+  app.router.add_get("/api/screenrecord/download/{file_id}", routes_logs.api_screenrecord_download)
 
   # ws
   app.router.add_get("/ws/state", routes_ws.ws_state)

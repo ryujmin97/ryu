@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/css/tokens.css?v=2603-73" />
   <link rel="stylesheet" href="/css/hud_card.css?v=2603-74" />
   <link rel="stylesheet" href="/css/app.css?v=2603-151" />
+  <link rel="stylesheet" href="/css/logs.css?v=2" />
 </head>
 
 <body>
@@ -306,6 +307,45 @@
         </form>
       </div>
     </div>
+
+    <!-- ════════════ LOGS (Dashcam / Screen Recording) ════════════ -->
+    <div id="pageLogs" class="page" style="display:none;">
+      <div class="page-header page-header--hidden" aria-hidden="true">
+        <h2 id="logsTitle" class="page-title">Logs</h2>
+      </div>
+
+      <div class="logs-subtabs" role="tablist">
+        <button id="logsTabDashcam" class="logs-subtab active" role="tab" aria-selected="true" type="button">대시캠</button>
+        <button id="logsTabScreenrecord" class="logs-subtab" role="tab" aria-selected="false" type="button">화면녹화</button>
+      </div>
+
+      <div id="logsStatus" class="muted logs-status" hidden></div>
+
+      <!-- 대시캠(주행 로그) 패널 -->
+      <div id="logsPanelDashcam" class="logs-panel">
+        <div class="logs-toolbar">
+          <div class="muted" id="dashcamMeta">-</div>
+          <div class="logs-toolbar__actions">
+            <button id="btnDashcamSelectAll" class="smallBtn" type="button">전체 선택</button>
+            <button id="btnDashcamDownloadSelected" class="smallBtn btn--filled" type="button">선택 다운로드</button>
+          </div>
+        </div>
+        <div id="dashcamRoutes" class="dashcam-routes"></div>
+        <button id="btnDashcamLoadMore" class="btn logs-loadmore" type="button" hidden>더 보기</button>
+      </div>
+
+      <!-- 화면 녹화 패널 -->
+      <div id="logsPanelScreenrecord" class="logs-panel" hidden>
+        <div class="logs-toolbar">
+          <div class="muted" id="screenrecordMeta">-</div>
+          <div class="logs-toolbar__actions">
+            <button id="btnScreenrecordSelectAll" class="smallBtn" type="button">전체 선택</button>
+            <button id="btnScreenrecordDownloadSelected" class="smallBtn btn--filled" type="button">선택 다운로드</button>
+          </div>
+        </div>
+        <div id="screenrecordList" class="screenrecord-list"></div>
+      </div>
+    </div>
   </div>
 
   <div class="global-home-record-fab" aria-hidden="true">
@@ -337,6 +377,12 @@
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2m0 2v10h16V7zm2.8 8.6 3.8-3.6-3.8-3.6 1.4-1.4 5.2 5-5.2 5zm7.7 0H18v2h-3.5z"/></svg>
       </span>
       <span>Terminal</span>
+    </button>
+    <button id="btnLogs" class="nav-btn">
+      <span class="nav-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4zM9 8.5l5 3.5-5 3.5v-7z"/></svg>
+      </span>
+      <span>Logs</span>
     </button>
     <button id="btnFleet" class="nav-btn">
       <span class="nav-icon">
@@ -389,8 +435,9 @@
   </div>
 
   <script src="/js/hud_card.js?v=2603-73"></script>
-  <script src="/js/app_core.js?v=2603-103"></script>
-  <script src="/js/app_pages.js?v=2603-115"></script>
+  <script src="/js/app_core.js?v=2603-104"></script>
+  <script src="/js/app_pages.js?v=2603-116"></script>
+  <script src="/js/logs.js?v=2"></script>
   <script src="/js/app_realtime.js?v=2603-76"></script>
 </body>
 </html>

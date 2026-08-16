@@ -31,6 +31,7 @@ const UI_STRINGS = {
     setting: "설정",
     tools: "도구",
     terminal: "터미널",
+    logs: "로그",
     fleet: "Fleet",
     lang: "언어",
     branch_select: "브랜치 선택",
@@ -119,6 +120,7 @@ const UI_STRINGS = {
     setting: "Setting",
     tools: "Tools",
     terminal: "Terminal",
+    logs: "Logs",
     fleet: "Fleet",
     lang: "Lang",
     branch_select: "Branch Select",
@@ -206,6 +208,7 @@ const UI_STRINGS = {
     setting: "设置",
     tools: "工具",
     terminal: "终端",
+    logs: "日志",
     fleet: "车队",
     lang: "语言",
     branch_select: "分支选择",
@@ -413,6 +416,7 @@ let CURRENT_MAKER = null;
 const btnHome = document.getElementById("btnHome");
 const btnSetting = document.getElementById("btnSetting");
 const btnTerminal = document.getElementById("btnTerminal");
+const btnLogs = document.getElementById("btnLogs");
 const btnFleet = document.getElementById("btnFleet");
 const btnLang = document.getElementById("btnLang");
 const langLabel = document.getElementById("langLabel");
@@ -450,6 +454,7 @@ const PAGE_ELEMENTS = {
   tools: document.getElementById("pageTools"),
   terminal: document.getElementById("pageTerminal"),
   branch: document.getElementById("pageBranch"),
+  logs: document.getElementById("pageLogs"),
 };
 const PAGE_TRANSITION_CLASSES = [
   "page-transitioning",
@@ -506,6 +511,7 @@ btnHome.onclick = () => showPage("home", true, getSwipeTransition(CURRENT_PAGE, 
 btnRecordToggle.onclick = () => toggleRecord();
 btnSetting.onclick = () => showPage("setting", true, getSwipeTransition(CURRENT_PAGE, "setting"));
 btnTerminal.onclick = () => showPage("terminal", true, getSwipeTransition(CURRENT_PAGE, "terminal"));
+btnLogs.onclick = () => showPage("logs", true, getSwipeTransition(CURRENT_PAGE, "logs"));
 
 btnFleet.onclick = async () => {
   const ip = location.hostname;
@@ -781,6 +787,7 @@ function showPage(page, pushHistory = false, transition = null) {
   btnSetting.classList.toggle("active", page === "setting");
   btnTools.classList.toggle("active", page === "tools");
   btnTerminal.classList.toggle("active", page === "terminal");
+  btnLogs.classList.toggle("active", page === "logs");
 
   if (page !== "setting" && typeof closeSettingSearchPanel === "function") {
     closeSettingSearchPanel({ clear: false });
@@ -815,6 +822,9 @@ function showPage(page, pushHistory = false, transition = null) {
   if (page === "terminal" && typeof initTerminalPage === "function") {
     initTerminalPage();
   }
+  if (page === "logs" && typeof initLogsPage === "function") {
+    initLogsPage();
+  }
 
   const state =
     (page === "home") ? { page: "home" } :
@@ -822,6 +832,7 @@ function showPage(page, pushHistory = false, transition = null) {
     (page === "car") ? { page: "car", screen: "makers", maker: null } :
     (page === "tools") ? { page: "tools" } :
     (page === "terminal") ? { page: "terminal" } :
+    (page === "logs") ? { page: "logs" } :
     (page === "branch") ? { page: "branch" } :
     { page: "home" };
 
@@ -931,6 +942,7 @@ function renderUIText() {
   setNavText("btnSetting", s.setting);
   setNavText("btnTools", s.tools);
   setNavText("btnTerminal", s.terminal);
+  setNavText("btnLogs", s.logs);
   setNavText("btnFleet", s.fleet);
 
   // Home

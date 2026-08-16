@@ -1,0 +1,186 @@
+/* Logs page (Dashcam / Screenrecord) — c3-ms-web */
+
+.logs-subtabs {
+  display: flex;
+  gap: var(--sp-sm);
+  margin-bottom: var(--sp-md);
+}
+
+.logs-subtab {
+  flex: 1;
+  padding: var(--sp-sm) var(--sp-md);
+  border-radius: var(--r-pill);
+  border: none;
+  background: var(--md-surface-cont);
+  color: var(--md-on-surface-var);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.logs-subtab.active {
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+}
+
+.logs-status {
+  margin-bottom: var(--sp-sm);
+}
+
+.logs-status.is-error {
+  color: var(--md-error);
+}
+
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-sm);
+  margin-bottom: var(--sp-sm);
+}
+
+.logs-toolbar__actions {
+  display: flex;
+  gap: var(--sp-sm);
+}
+
+.logs-empty {
+  padding: var(--sp-xl) 0;
+  text-align: center;
+}
+
+.logs-loadmore {
+  width: 100%;
+  margin-top: var(--sp-md);
+}
+
+/* Dashcam */
+
+.dashcam-routes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-sm);
+}
+
+.dashcam-route {
+  background: var(--md-surface-cont);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.dashcam-route__head {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--sp-md);
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashcam-route__title {
+  font-weight: 700;
+  font-size: var(--fs-title-sm);
+}
+
+.dashcam-route__meta {
+  display: flex;
+  gap: var(--sp-sm);
+  font-size: 13px;
+}
+
+.dashcam-route__selected {
+  color: var(--md-primary);
+  font-weight: 600;
+}
+
+.dashcam-route__body {
+  border-top: 1px solid var(--md-surface-cont-h);
+}
+
+.dashcam-segment {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  padding: var(--sp-sm) var(--sp-md);
+  border-top: 1px solid var(--md-surface-cont-h);
+}
+
+.dashcam-segment:first-child {
+  border-top: none;
+}
+
+.dashcam-segment__check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dashcam-segment__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--md-outline-var);
+}
+
+.dashcam-segment__date {
+  font-size: 12px;
+}
+
+.dashcam-segment__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.dashcam-segment__actions .smallBtn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Screenrecord */
+
+.screenrecord-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-sm);
+}
+
+.screenrecord-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-md);
+  padding: var(--sp-sm) var(--sp-md);
+  background: var(--md-surface-cont);
+  border-radius: var(--r-lg);
+}
+
+.screenrecord-item__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.screenrecord-item__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.screenrecord-item__actions .smallBtn,
+.screenrecord-item .smallBtn {
+  text-decoration: none;
+}
+
+.logs-checkbox {
+  width: 20px;
+  height: 20px;
+}
