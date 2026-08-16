@@ -26,7 +26,7 @@ void logger_rotate(LoggerdState *s) {
   assert(ret);
   s->ready_to_rotate = 0;
   s->last_rotate_tms = millis_since_boot();
-  LOGW((s->logger.segment() == 0) ? "logging to %s" : "rotated to %s", s->logger.segmentPath().c_str());
+  LOGW((s->logger.routeSegment() == 0) ? "logging to %s" : "rotated to %s", s->logger.segmentPath().c_str());
 }
 
 void rotate_if_needed(LoggerdState *s) {

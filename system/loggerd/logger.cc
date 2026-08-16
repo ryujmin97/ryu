@@ -161,9 +161,14 @@ static void log_sentinel(LoggerState *log, SentinelType type, int exit_signal = 
   log->write(msg.toBytes(), true);
 }
 
+// 라우트당 최대 세그먼트 개수. 이 개수를 채우면(41번째 세그먼트부터)
+// 새 라우트를 만들어 이어서 기록한다.
+constexpr int MAX_SEGMENTS_PER_ROUTE = 40;
+
 LoggerState::LoggerState(const std::string &log_root) {
+  log_root_dir = log_root;
   route_name = logger_get_identifier("RouteCount");
-  route_path = log_root + "/" + route_name;
+  route_path = log_root_dir + "/" + route_name;
   init_data = logger_build_init_data();
 }
 
@@ -175,12 +180,31 @@ LoggerState::~LoggerState() {
 }
 
 bool LoggerState::next() {
+  // route_part(현재 라우트 내 세그먼트 인덱스)가 MAX_SEGMENTS_PER_ROUTE에
+  // 도달하면 이번에 닫는 세그먼트가 라우트의 마지막 세그먼트다. 그 경우
+  // END_OF_SEGMENT가 아니라 END_OF_ROUTE로 마무리해야 라우트 하나가
+  // 온전한 rlog/qlog 시퀀스(START_OF_ROUTE ~ END_OF_ROUTE)를 갖는다.
+  bool route_rotating = (route_part + 1) >= MAX_SEGMENTS_PER_ROUTE;
+
   if (rlog) {
-    log_sentinel(this, SentinelType::END_OF_SEGMENT);
+    log_sentinel(this, route_rotating ? SentinelType::END_OF_ROUTE : SentinelType::END_OF_SEGMENT);
     std::remove(lock_file.c_str());
   }
 
-  segment_path = route_path + "--" + std::to_string(++part);
+  // part(전역 세그먼트 카운터, segment())는 loggerd.cc에서 encoderd가
+  // 보내는 절대 세그먼트 번호와의 동기화에 쓰이므로 라우트가 바뀌어도
+  // 리셋하지 않고 계속 증가시킨다. 폴더명과 START_OF_ROUTE 판단에는
+  // route_part(라우트 내 세그먼트 인덱스)만 쓴다.
+  ++part;
+  ++route_part;
+  if (route_rotating) {
+    route_name = logger_get_identifier("RouteCount");
+    route_path = log_root_dir + "/" + route_name;
+    route_part = 0;
+    Params().put("CurrentRoute", route_name);
+  }
+
+  segment_path = route_path + "--" + std::to_string(route_part);
   bool ret = util::create_directories(segment_path, 0775);
   assert(ret == true);
 
@@ -192,7 +216,7 @@ bool LoggerState::next() {
 
   // log init data & sentinel type.
   write(init_data.asBytes(), true);
-  log_sentinel(this, part > 0 ? SentinelType::START_OF_SEGMENT : SentinelType::START_OF_ROUTE);
+  log_sentinel(this, route_part > 0 ? SentinelType::START_OF_SEGMENT : SentinelType::START_OF_ROUTE);
   return true;
 }
 
