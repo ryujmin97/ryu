@@ -27,16 +27,32 @@ V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 RADAR_TO_CENTER = 2.7   # (deprecated) RADAR is ~ 2.7m ahead from center of car
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 
-# --- LeadBlend safety tuning (vision-only lead tracking) ---
-# EnableRadarTracks < 3 cars (no usable radar points) rely entirely on the vision
-# model for lead detection, so track switches and brief misses are common. This
-# layer debounces the noise WITHOUT ever delaying a genuinely dangerous change.
+# --- LeadBlend safety tuning ---
+# EnableRadarTracks < 3 cars have a working single-point SCC radar for the
+# in-lane lead (it's the primary source most of the time -- ~74-82% of tracked
+# time in real drive logs), but no multi-track/corner radar for adjacent lanes.
+# When the SCC radar briefly loses lock (close range, blind spot, transitions)
+# leadOne temporarily falls back to the vision model, and that fallback window
+# is where track switches and brief misses actually happen (~80-90% of
+# lost-lead events despite being <30% of tracked time). This layer debounces
+# that noise WITHOUT ever delaying a genuinely dangerous change.
 LEAD_BLEND_TTC_DANGER    = 2.5   # s   : TTC below this => treat as dangerous, apply immediately
 LEAD_BLEND_DANGER_HOLD   = 0.3   # s   : once flagged dangerous, keep bypassing smoothing this long
 LEAD_BLEND_SAFE_DIST_TIME = 0.35 # s   : time constant to blend dRel/vRel toward a safe-direction switch
 LEAD_LOST_GRACE_TIME     = 0.6   # s   : hold last known lead through a brief vision miss (debounce)
 CUTOUT_DPATH_THRESH      = 2.0   # m   : |dPath| beyond this = lead has clearly left our path (cut-out)
 CUTOUT_VREL_GATE         = -0.5  # m/s : only treat a miss as a cut-out if lead wasn't strongly closing
+# 2026-08-16 실주행 로그(총 67분) 분석 결과 추가된 게이트:
+LEAD_BLEND_CLOSER_JUMP_DIST = 8.0  # m : 새 dRel이 이전보다 이만큼 더 가까우면, vRel이 잠잠해 보여도
+                                    #     위험으로 간주하고 즉시 반영. SCC가 근접구간/사각지대에서
+                                    #     순간적으로 락을 놓치면서 직전의 오래된(먼 거리) 값을 잠깐
+                                    #     들고 있다가, 비전으로 넘어가는 순간 정확한 근거리 값으로
+                                    #     튀는 패턴 대응 (route1 seg13 t=794s 실측)
+LEAD_BLEND_BIG_JUMP_DIST    = 15.0 # m : 이보다 큰 '안전 방향' 점프는 노이즈가 아니라 다른 물체로
+                                    #     대상이 바뀐 것으로 보고, 블렌딩하지 않고 즉시 스냅
+                                    #     (블렌딩 시 실제로 없는 가짜 상대속도가 생겨 MPC를 오도할
+                                    #     수 있음. 정체 구간 비전 트랙 흔들림에서 실측: route1
+                                    #     t=1388~1390s / route2 t=825~827s)
 
 
 def laplacian_pdf(x: float, mu: float, b: float):
@@ -472,7 +488,12 @@ class LeadBlend:
   - Asymmetric blend: a track switch that makes things safer (opening
     distance / slower closing) is smoothed in over LEAD_BLEND_SAFE_DIST_TIME.
     A track switch that makes things worse (closing distance, worsening
-    relative speed, TTC < LEAD_BLEND_TTC_DANGER) is passed through immediately.
+    relative speed, TTC < LEAD_BLEND_TTC_DANGER, or a jump revealing a
+    meaningfully closer lead regardless of vRel) is passed through immediately.
+  - Jumps bigger than LEAD_BLEND_BIG_JUMP_DIST in the safe direction are
+    treated as a track identity change, not measurement noise, and are
+    snapped immediately instead of blended (blending a large gap over a fixed
+    time window fabricates an implied relative speed that isn't real).
   """
   def __init__(self):
     self.prev: dict | None = None
@@ -490,7 +511,13 @@ class LeadBlend:
     closing = raw['vRel'] < -0.1
     worsening = (self.prev is not None and self.prev.get('status') and
                  raw['vRel'] < self.prev.get('vRel', 0.0) - 0.3)
-    return ttc < LEAD_BLEND_TTC_DANGER and (closing or worsening)
+    # 순간 vRel만으로는 못 잡는 케이스: 트랙이 바뀌면서 실제로는 훨씬 가까운
+    # 리드가 드러나는 경우 (예: SCC가 근접구간/사각지대에서 순간적으로 락을
+    # 놓치면서 오래된 원거리 값을 들고 있다가 비전으로 넘어가는 순간 정확한
+    # 근거리 값이 드러남). vRel 부호와 무관하게 위험으로 취급한다.
+    closer_jump = (self.prev is not None and self.prev.get('status') and
+                   (self.prev.get('dRel', 0.0) - raw['dRel']) > LEAD_BLEND_CLOSER_JUMP_DIST)
+    return closer_jump or (ttc < LEAD_BLEND_TTC_DANGER and (closing or worsening))
 
   def _is_cutout(self) -> bool:
     if self.prev is None or not self.prev.get('status'):
@@ -528,6 +555,14 @@ class LeadBlend:
 
     if dangerous or self.danger_hold_cnt > 0:
       self.danger_hold_cnt = max(0, self.danger_hold_cnt - 1)
+      self.prev = dict(raw)
+      return raw
+
+    # 큰 폭(>LEAD_BLEND_BIG_JUMP_DIST)의 '안전 방향' 점프는 측정 노이즈가 아니라
+    # 다른 물체로 대상이 바뀐 것으로 보고 블렌딩 없이 즉시 반영한다. 고정된
+    # 시간(LEAD_BLEND_SAFE_DIST_TIME)에 큰 거리 차를 나눠 블렌딩하면, 실제로는
+    # 없는 상대속도가 그 구간 동안 인위적으로 생겨 MPC 입력을 왜곡할 수 있다.
+    if abs(raw['dRel'] - self.prev.get('dRel', raw['dRel'])) > LEAD_BLEND_BIG_JUMP_DIST:
       self.prev = dict(raw)
       return raw
 
