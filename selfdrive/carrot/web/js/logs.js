@@ -299,6 +299,18 @@ async function screenrecordDownloadSelected() {
 /* 초기화 / 이벤트 바인딩                                                   */
 /* ---------------------------------------------------------------------- */
 
+function getGdriveStatusHTML() {
+  if (logsState.gdrive.connected) {
+    return "Google Drive: 연결됨";
+  } else if (logsState.gdrive.status === "pending") {
+    const href = logsState.gdrive.verificationUri || "#";
+    const code = logsState.gdrive.userCode || "code";
+    return `<a href="${href}" target="_blank" style="color: inherit; text-decoration: underline; cursor: pointer;">Google Drive</a>: 인증 대기 (${escapeHtml(code)})`;
+  } else {
+    return "Google Drive: 연결 안됨";
+  }
+}
+
 async function loadGdriveStatus() {
   try {
     const r = await fetch("/api/gdrive/status");
@@ -311,7 +323,7 @@ async function loadGdriveStatus() {
     logsState.gdrive.lastError = j.last_error || "";
     const el = document.getElementById("logsGdriveStatus");
     if (el) {
-      el.textContent = logsState.gdrive.connected ? "Google Drive: 연결됨" : (logsState.gdrive.status === "pending" ? `Google Drive: 인증 대기 (${logsState.gdrive.userCode || "code"})` : "Google Drive: 연결 안됨");
+      el.innerHTML = getGdriveStatusHTML();
     }
   } catch (e) {
     // ignore
@@ -341,7 +353,7 @@ async function triggerGdriveAuth() {
     logsState.gdrive.status = "pending";
     const el = document.getElementById("logsGdriveStatus");
     if (el) {
-      el.textContent = `Google Drive 인증 대기: ${logsState.gdrive.userCode}`;
+      el.innerHTML = getGdriveStatusHTML();
     }
     if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
     logsState.gdrive.polling = setInterval(async () => {
@@ -361,7 +373,7 @@ async function triggerGdriveAuth() {
       }
       const s = document.getElementById("logsGdriveStatus");
       if (s) {
-        s.textContent = logsState.gdrive.connected ? "Google Drive: 연결됨" : (logsState.gdrive.status === "pending" ? `Google Drive: 인증 대기 (${logsState.gdrive.userCode || "code"})` : "Google Drive: 연결 안됨");
+        s.innerHTML = getGdriveStatusHTML();
       }
     }, 5000);
     showAppToast("브라우저에서 인증 코드를 입력해 주세요", { tone: "success" });
