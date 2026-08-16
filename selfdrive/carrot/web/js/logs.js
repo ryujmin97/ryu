@@ -305,10 +305,25 @@ function getGdriveStatusHTML() {
   } else if (logsState.gdrive.status === "pending") {
     const href = logsState.gdrive.verificationUri || "#";
     const code = logsState.gdrive.userCode || "code";
-    return `<a href="${href}" target="_blank" style="color: inherit; text-decoration: underline; cursor: pointer;">Google Drive</a>: 인증 대기 (${escapeHtml(code)})`;
+    return `<a href="${href}" target="_blank" style="color: inherit; text-decoration: underline; cursor: pointer;">Google Drive</a>: 인증 대기 (${escapeHtml(code)}) <button id="btnCopyGdriveCode" class="smallBtn" type="button" title="코드 복사">복사</button>`;
   } else {
     return "Google Drive: 연결 안됨";
   }
+}
+
+function bindGdriveCopyButton() {
+  const btn = document.getElementById("btnCopyGdriveCode");
+  if (!btn) return;
+  btn.onclick = async () => {
+    const code = logsState.gdrive.userCode || "";
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      showAppToast("코드가 복사되었습니다", { tone: "success" });
+    } catch (e) {
+      showAppToast("복사 실패: " + (e?.message || ""), { tone: "error" });
+    }
+  };
 }
 
 async function loadGdriveStatus() {
@@ -324,6 +339,7 @@ async function loadGdriveStatus() {
     const el = document.getElementById("logsGdriveStatus");
     if (el) {
       el.innerHTML = getGdriveStatusHTML();
+      bindGdriveCopyButton();
     }
   } catch (e) {
     // ignore
@@ -354,6 +370,7 @@ async function triggerGdriveAuth() {
     const el = document.getElementById("logsGdriveStatus");
     if (el) {
       el.innerHTML = getGdriveStatusHTML();
+      bindGdriveCopyButton();
     }
     if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
     logsState.gdrive.polling = setInterval(async () => {
@@ -374,6 +391,7 @@ async function triggerGdriveAuth() {
       const s = document.getElementById("logsGdriveStatus");
       if (s) {
         s.innerHTML = getGdriveStatusHTML();
+        bindGdriveCopyButton();
       }
     }, 5000);
     showAppToast("브라우저에서 인증 코드를 입력해 주세요", { tone: "success" });
