@@ -9,6 +9,7 @@ import threading
 import time
 import numpy as np
 import zmq
+import time as time_module
 from datetime import datetime
 import traceback
 from typing import Any, Dict, List, Optional
@@ -213,7 +214,10 @@ class CarrotMan:
 
     self.turn_speed_last = 250
     self.vturn_last_speed = 250.0
-    self.vturn_lookahead_steps = 8
+    self.vturn_lookahead_steps = 20  # 4~5초 lookahead (20 frames @ ~5Hz)
+    self.vturn_curve_active = False
+    self.vturn_curve_exit_time = 0
+    self.vturn_curve_exit_recovery_duration = 2.0  # 곡선 종료 후 2초간 가속 회복
     self.curvatureFilter = MyMovingAverage(20)
     self.carrot_curve_speed_params()
 
@@ -912,8 +916,9 @@ class CarrotMan:
     return self.vturn_speed(sm['carState'], sm)
 
   def vturn_speed(self, CS, sm):
-    TARGET_LAT_A = 1.6  # m/s^2, 사전예측형 vturn을 위해 약간 더 보수적으로 설정
-
+    TARGET_LAT_A = 1.6  # m/s^2
+    CURVE_THRESHOLD = 0.015  # 곡선 활성 임계값 (yaw rate)
+    
     modelData = sm['modelV2']
     v_ego = max(CS.vEgo, 0.1)
 
@@ -929,34 +934,50 @@ class CarrotMan:
     if len(orientation_rate) == 0:
       return 250.0
 
-    # 곡선 진입/종료 시점을 더 미리 감지하도록, 현재값만 보는 대신 앞쪽 예측 구간을 우선 검토
-    lookahead_steps = max(3, min(len(orientation_rate), self.vturn_lookahead_steps))
+    # 4~5초 lookahead (20 frames) - 곡선을 더 미리 감지
+    lookahead_steps = max(5, min(len(orientation_rate), self.vturn_lookahead_steps))
     lookahead_rate = orientation_rate[:lookahead_steps]
     lookahead_vel = velocity[:lookahead_steps]
 
     if len(lookahead_rate) > 1:
-      weights = np.linspace(1.0, 0.35, len(lookahead_rate))
+      weights = np.linspace(1.0, 0.2, len(lookahead_rate))  # 더 완만한 가중치
       future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel) * weights
     else:
       future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel)
 
+    max_pred_lat_acc = float(np.max(future_lat_acc))
+    max_curve = max_pred_lat_acc / (v_ego**2) if max_pred_lat_acc > 0.0 else 1e-6
+    
     curv_direction = np.sign(np.sum(lookahead_rate))
     if curv_direction == 0:
       curv_direction = np.sign(orientation_rate[0]) if orientation_rate[0] != 0 else 1.0
-
-    max_pred_lat_acc = float(np.max(future_lat_acc))
-    max_curve = max_pred_lat_acc / (v_ego**2) if max_pred_lat_acc > 0.0 else 1e-6
 
     adjusted_target_lat_a = TARGET_LAT_A * self.autoCurveSpeedAggressiveness
     turnSpeed = max(abs(adjusted_target_lat_a / max_curve)**0.5 * 3.6, 5.0)
     turnSpeed = min(turnSpeed, 250.0)
 
+    # 곡선 활성 상태 추적
+    current_curve_active = max(np.abs(lookahead_rate)) > CURVE_THRESHOLD
+    
+    # 곡선 종료 감지 - 곡선이 활성 상태에서 비활성으로 전환
+    if self.vturn_curve_active and not current_curve_active:
+      self.vturn_curve_exit_time = time.time()
+    
+    self.vturn_curve_active = current_curve_active
+    
+    # 곡선 종료 후 가속 회복 로직
+    time_since_curve_exit = time.time() - self.vturn_curve_exit_time if self.vturn_curve_exit_time > 0 else float('inf')
+    if time_since_curve_exit < self.vturn_curve_exit_recovery_duration:
+      # 곡선 종료 후 2초 동안 점진적으로 속도 회복
+      recovery_ratio = time_since_curve_exit / self.vturn_curve_exit_recovery_duration
+      turnSpeed = turnSpeed + (self.vturn_last_speed - turnSpeed) * (1.0 - recovery_ratio) * 0.5
+    
     # 급격한 속도 차단을 줄이고, 예측형 반응이 더 부드럽게 동작하도록 마지막 속도를 유지
     if np.isfinite(self.vturn_last_speed):
       if turnSpeed < self.vturn_last_speed:
-        turnSpeed = min(turnSpeed, self.vturn_last_speed * 0.92)
+        turnSpeed = min(turnSpeed, self.vturn_last_speed * 0.90)  # 감속 더 부드럽게
       else:
-        turnSpeed = max(turnSpeed, self.vturn_last_speed * 1.05)
+        turnSpeed = max(turnSpeed, self.vturn_last_speed * 1.08)  # 가속 더 빠르게
     self.vturn_last_speed = float(turnSpeed)
 
     return turnSpeed * curv_direction
