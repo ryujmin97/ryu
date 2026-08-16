@@ -538,8 +538,10 @@ async def api_gdrive_device(request: web.Request) -> web.Response:
     method="POST",
   )
   try:
-    with urllib.request.urlopen(req, timeout=30) as resp:
-      body = json.loads(resp.read().decode("utf-8"))
+    def _do():
+      with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+    body = await asyncio.to_thread(_do)
   except Exception as e:
     GDRIVE_STATE["status"] = "error"
     GDRIVE_STATE["last_error"] = str(e)
@@ -561,6 +563,10 @@ async def api_gdrive_device(request: web.Request) -> web.Response:
 
 
 async def api_gdrive_token(request: web.Request) -> web.Response:
+  """Device flow 토큰 폴링. 프론트가 5초 간격으로 이 엔드포인트를 반복
+  호출해야 사용자의 Google 승인 여부를 알 수 있다 (Google 쪽에서 알아서
+  push 해주지 않음 — device authorization grant는 클라이언트가 계속
+  물어봐야 하는 방식)."""
   try:
     payload = await request.json()
   except Exception:
@@ -585,13 +591,26 @@ async def api_gdrive_token(request: web.Request) -> web.Response:
     method="POST",
   )
   try:
-    with urllib.request.urlopen(req, timeout=30) as resp:
-      body = json.loads(resp.read().decode("utf-8"))
+    def _do():
+      with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+    body = await asyncio.to_thread(_do)
   except urllib.error.HTTPError as e:
     try:
       err = json.loads(e.read().decode("utf-8"))
     except Exception:
       err = {"error": str(e)}
+    err_code = err.get("error") if isinstance(err, dict) else None
+    if err_code in ("authorization_pending", "slow_down"):
+      # 사용자가 아직 Google 화면에서 승인하지 않은 "정상" 상태.
+      # 이걸 에러로 취급하면 폴링 첫 시도에서 바로 status="error"가 되어
+      # 실제로 승인해도 절대 연결되지 않는다 (보고된 증상의 2차 원인).
+      return web.json_response({
+        "ok": True,
+        "connected": False,
+        "pending": True,
+        "status": GDRIVE_STATE["status"],
+      })
     GDRIVE_STATE["status"] = "error"
     GDRIVE_STATE["last_error"] = str(err)
     return web.json_response({"ok": False, "error": err}, status=400)
@@ -615,10 +634,12 @@ async def api_gdrive_token(request: web.Request) -> web.Response:
   return web.json_response({
     "ok": bool(access_token),
     "connected": bool(access_token),
+    "pending": not access_token,
     "status": GDRIVE_STATE["status"],
     "message": "Google Drive 연결 완료" if access_token else "권한을 아직 승인하지 않았습니다",
     "token": body,
   })
+
 
 
 def _resolve_drive_payload(body: dict[str, Any]) -> tuple[str, str, str] | None:

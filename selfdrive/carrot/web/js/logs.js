@@ -23,6 +23,9 @@ const logsState = {
     verificationUri: "",
     lastError: "",
     polling: null,
+    clientId: "",
+    clientSecret: "",
+    deviceCode: "",
   },
 };
 
@@ -306,6 +309,9 @@ function getGdriveStatusHTML() {
     const href = logsState.gdrive.verificationUri || "#";
     const code = logsState.gdrive.userCode || "code";
     return `<a href="${href}" target="_blank" style="color: inherit; text-decoration: underline; cursor: pointer;">Google Drive</a>: 인증 대기 (${escapeHtml(code)}) <button id="btnCopyGdriveCode" class="smallBtn" type="button" title="코드 복사">복사</button>`;
+  } else if (logsState.gdrive.status === "error") {
+    const msg = logsState.gdrive.lastError ? `: ${escapeHtml(String(logsState.gdrive.lastError))}` : "";
+    return `Google Drive: 인증 실패${msg}`;
   } else {
     return "Google Drive: 연결 안됨";
   }
@@ -361,9 +367,65 @@ async function loadGdriveStatus() {
       el.innerHTML = getGdriveStatusHTML();
       bindGdriveCopyButton();
     }
+    // 페이지를 새로고침했는데 서버가 여전히 "인증 대기" 상태를 들고 있으면
+    // (예: 폰에서 코드는 입력했지만 아직 브라우저를 안 닫음) 폴링을
+    // 재개한다. device_code/client_id는 서버(GDRIVE_STATE)에 남아있는
+    // 값을 그대로 쓰도록 비워서 보낸다 (api_gdrive_token이 폴백 처리).
+    if (!logsState.gdrive.connected && logsState.gdrive.status === "pending" && !logsState.gdrive.polling) {
+      startGdriveTokenPolling();
+    }
   } catch (e) {
     // ignore
   }
+}
+
+function startGdriveTokenPolling() {
+  // Google device authorization grant는 승인 여부를 서버가 능동적으로
+  // "알려주지" 않는다. 클라이언트가 /api/gdrive/token(grant_type=
+  // device_code)을 반복 호출해서 물어봐야 한다. 예전 코드는 여기서
+  // /api/gdrive/status(로컬 상태 읽기)만 반복 호출했는데, 그 로컬 상태는
+  // 이 token 폴링이 실제로 실행돼야만 바뀌므로 절대 "연결됨"으로 전환되지
+  // 않는 버그가 있었다 — 방금 Google 쪽에서 승인해도 carrotweb은 절대
+  // 알 수 없는 구조였다.
+  if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
+  logsState.gdrive.polling = setInterval(async () => {
+    let sj;
+    try {
+      const sr = await fetch("/api/gdrive/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: logsState.gdrive.clientId,
+          client_secret: logsState.gdrive.clientSecret,
+          device_code: logsState.gdrive.deviceCode,
+        }),
+      });
+      sj = await sr.json();
+    } catch (e) {
+      return; // 일시적 네트워크 오류는 다음 폴링에서 재시도
+    }
+    if (sj && sj.connected) {
+      logsState.gdrive.connected = true;
+      logsState.gdrive.status = "connected";
+      showAppToast("Google Drive 연결 완료", { tone: "success" });
+      if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
+      logsState.gdrive.polling = null;
+    } else if (sj && sj.pending) {
+      // 아직 사용자가 Google 화면에서 승인하지 않음 — 정상, 계속 폴링
+      logsState.gdrive.status = "pending";
+    } else if (sj && !sj.ok) {
+      logsState.gdrive.status = "error";
+      logsState.gdrive.lastError = (sj.error && (sj.error.error_description || sj.error.error)) || sj.error || "error";
+      showAppToast(`Drive 인증 실패: ${logsState.gdrive.lastError}`, { tone: "error" });
+      if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
+      logsState.gdrive.polling = null;
+    }
+    const s = document.getElementById("logsGdriveStatus");
+    if (s) {
+      s.innerHTML = getGdriveStatusHTML();
+      bindGdriveCopyButton();
+    }
+  }, 5000);
 }
 
 async function triggerGdriveAuth() {
@@ -384,6 +446,9 @@ async function triggerGdriveAuth() {
       showAppToast(j?.error || "인증 요청 실패", { tone: "error" });
       return;
     }
+    logsState.gdrive.clientId = clientId;
+    logsState.gdrive.clientSecret = clientSecret;
+    logsState.gdrive.deviceCode = j.device_code || "";
     logsState.gdrive.userCode = j.user_code || "";
     logsState.gdrive.verificationUri = j.verification_uri || "";
     logsState.gdrive.status = "pending";
@@ -392,28 +457,7 @@ async function triggerGdriveAuth() {
       el.innerHTML = getGdriveStatusHTML();
       bindGdriveCopyButton();
     }
-    if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
-    logsState.gdrive.polling = setInterval(async () => {
-      const sr = await fetch("/api/gdrive/status");
-      const sj = await sr.json();
-      if (sj && sj.connected) {
-        logsState.gdrive.connected = true;
-        logsState.gdrive.status = "connected";
-        showAppToast("Google Drive 연결 완료", { tone: "success" });
-        if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
-        logsState.gdrive.polling = null;
-      } else if (sj && sj.status === "error") {
-        logsState.gdrive.status = "error";
-        logsState.gdrive.lastError = sj.last_error || "error";
-        if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
-        logsState.gdrive.polling = null;
-      }
-      const s = document.getElementById("logsGdriveStatus");
-      if (s) {
-        s.innerHTML = getGdriveStatusHTML();
-        bindGdriveCopyButton();
-      }
-    }, 5000);
+    startGdriveTokenPolling();
     showAppToast("브라우저에서 인증 코드를 입력해 주세요", { tone: "success" });
   } catch (e) {
     showAppToast(e?.message || "인증 실패", { tone: "error" });
