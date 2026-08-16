@@ -169,6 +169,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CarrotCruiseAtcDecel", {PERSISTENT, INT, "-1"}},
     {"CommaLongAcc", {PERSISTENT, INT, "0"}},
 
+    {"CarrotGDriveClientId", {PERSISTENT, STRING}},
+    {"CarrotGDriveClientSecret", {PERSISTENT, STRING}},
+    {"CarrotGDriveRefreshToken", {PERSISTENT, STRING}},
+
     {"AutoGasTokSpeed", {PERSISTENT, INT, "0"}},
     {"AutoGasSyncSpeed", {PERSISTENT, INT, "1"} },
     {"ApplyModelSpeed", {PERSISTENT, INT, "0"} },
