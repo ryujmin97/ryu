@@ -215,12 +215,17 @@ class CarrotMan:
     self.turn_speed_last = 250
     self.vturn_last_speed = 250.0
     self.vturn_lookahead_horizon_s = 4.5  # 진입 조기감속용 예측 구간(초). T_IDXS가 비선형이라 '초' 기준으로 계산한다.
-    # 감속/가속 반응 시정수(초, 1차 저역통과 필터). 감속은 안전을 위해 빠르게, 가속 복귀는 부드럽게.
-    # 별도의 '진입/탈출 이벤트' 판정이나 지연(hold) 로직을 두지 않는다 - turnSpeed는 항상
-    # 전방예측(lookahead) 기반으로 매 프레임 재계산되므로, 곡선 정점을 지나 남은 구간이
-    # 줄어들면 물리적으로 곡선을 완전히 빠져나오기 전부터 자연스럽게 가속이 시작된다.
-    self.vturn_decel_rc = 0.25
-    self.vturn_accel_rc = 0.6
+    # 과속방지턱(calculate_current_speed)과 동일한 v_i^2 = v_f^2 + 2ad 물리공식을 커브에도
+    # 적용하기 위한 파라미터. AutoNaviSpeedBumpTime/AutoNaviSpeedDecelRate 기본값과 동일하게
+    # 맞춰서 사용자가 이미 익숙한 방지턱 감속 '느낌'과 최대한 비슷하게 시작한다.
+    self.vturn_safe_time = 1.0     # 초. 목표속도에 여유있게 미리 도달해 정점까지 유지
+    self.vturn_decel_rate = 1.2    # m/s^2. 방지턱 기본 감속률(AutoNaviSpeedDecelRate=120)과 동일
+    # 아래는 모델 프레임 노이즈 제거용 저역통과 필터일 뿐, 감속/가속의 '모양'은 위 물리공식이
+    # 만든다. 별도의 '진입/탈출 이벤트' 판정이나 지연(hold) 로직은 두지 않는다 - turnSpeed는
+    # 매 프레임 전방예측(lookahead) 기반 거리로 재계산되므로, 곡선 구간을 벗어나는 즉시(또는
+    # 정점을 지나 남은 구간이 줄면 그 이전부터) 자연스럽게 제약이 풀리고 가속이 시작된다.
+    self.vturn_decel_rc = 0.15
+    self.vturn_accel_rc = 0.15
     self.curvatureFilter = MyMovingAverage(20)
     self.carrot_curve_speed_params()
 
@@ -919,20 +924,36 @@ class CarrotMan:
     return self.vturn_speed(sm['carState'], sm)
 
   def vturn_speed(self, CS, sm):
+    """전방 커브에 대해 과속방지턱(calculate_current_speed)과 동일한
+    v_i^2 = v_f^2 + 2ad 물리공식으로 '미리 서서히 감속 -> 정점 근처에서 목표속도 유지
+    -> 커브를 빠져나오는 즉시 제약 해제' 형태의 주행감을 만든다.
+
+    방지턱과의 차이는, 방지턱은 내비게이션 데이터로부터 고정된 지점까지의 거리를
+    받아오는 반면, 커브는 비전모델이 매 프레임 새로 예측하는 전방 궤적(위치/속도/
+    회전각속도)에서 '지점별 필요속도'를 직접 계산한다는 점이다. 단일 정점(최대 곡률
+    지점)까지의 거리만 보지 않고 예측구간 내 모든 지점에 대해 방지턱과 같은 공식을
+    적용한 뒤 그중 가장 엄격한(작은) 값을 취하므로, S자 커브처럼 정점 앞에 더 가까운
+    완만한 커브가 끼어 있어도 놓치지 않는다.
+    """
     TARGET_LAT_A = 1.6  # m/s^2
 
     modelData = sm['modelV2']
-    v_ego = max(CS.vEgo, 0.1)
 
     orientation_rate = np.array(modelData.orientationRate.z, dtype=np.float64) * self.autoCurveSpeedFactor
     velocity = np.array(modelData.velocity.x, dtype=np.float64)
+    position = np.array(modelData.position.x, dtype=np.float64)
 
-    if len(orientation_rate) == 0 or len(velocity) == 0:
+    n = min(len(orientation_rate), len(velocity), len(position))
+    if n == 0:
       return 250.0
+    orientation_rate = orientation_rate[:n]
+    velocity = velocity[:n]
+    position = position[:n]
 
-    valid = np.isfinite(orientation_rate) & np.isfinite(velocity)
+    valid = np.isfinite(orientation_rate) & np.isfinite(velocity) & np.isfinite(position)
     orientation_rate = orientation_rate[valid]
     velocity = velocity[valid]
+    position = position[valid]
     if len(orientation_rate) == 0:
       return 250.0
 
@@ -946,36 +967,47 @@ class CarrotMan:
 
     lookahead_rate = orientation_rate[:lookahead_steps]
     lookahead_vel = velocity[:lookahead_steps]
+    lookahead_pos = np.maximum(position[:lookahead_steps], 0.0)  # 후방(음수) 지점은 배제
     lookahead_t = t_idxs[:lookahead_steps]
 
-    if len(lookahead_rate) > 1:
-      # 시간 기준 가중치: 가까운 시점을 더 신뢰하되, 먼 시점(4~5초 전방)도 충분한
-      # 비중(최소 0.45)을 유지해 조기감속 취지가 죽지 않게 한다.
-      weights = np.clip(1.0 - 0.55 * (lookahead_t / max(self.vturn_lookahead_horizon_s, 0.1)), 0.45, 1.0)
-      future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel) * weights
-      curv_direction = np.sign(np.sum(lookahead_rate * weights))
-    else:
-      future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel)
-      curv_direction = np.sign(lookahead_rate[0]) if len(lookahead_rate) else 0.0
+    # 각 지점에서, 모델이 예측한 그 지점의 주행속도로 지날 때 발생하는 횡가속도를
+    # 근거로 그 지점에서 필요한 속도상한(=커브 심할수록 낮음)을 지점별로 계산한다.
+    adjusted_target_lat_a = TARGET_LAT_A * self.autoCurveSpeedAggressiveness
+    point_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel)
+    point_curve = point_lat_acc / np.maximum(lookahead_vel, 0.1) ** 2
+    point_target_speed = np.where(
+      point_curve > 1e-8,
+      np.clip((adjusted_target_lat_a / np.maximum(point_curve, 1e-8)) ** 0.5 * 3.6, 5.0, 250.0),
+      250.0,
+    )
 
+    # ---- 과속방지턱과 동일한 감속 프로파일을 모든 지점에 벡터화 적용 ----
+    # carrot_serv.calculate_current_speed()의 v_i^2 = v_f^2 + 2ad 공식과 동일하며,
+    # safe_time만큼 여유를 두고 정점 이전에 이미 목표속도에 도달하도록 한다.
+    safe_speed_mps = point_target_speed / 3.6
+    safe_dist = safe_speed_mps * self.vturn_safe_time
+    decel_dist = np.maximum(lookahead_pos - safe_dist, 0.0)
+    required_speed_mps = np.sqrt(np.maximum(safe_speed_mps ** 2 + 2 * self.vturn_decel_rate * decel_dist, 0.0))
+    required_speed_kph = np.clip(required_speed_mps * 3.6, 5.0, 250.0)
+
+    # 여러 지점 중 가장 엄격한(=지금 당장 가장 느려야 하는) 지점이 최종 제약이 된다.
+    apex_idx = int(np.argmin(required_speed_kph))
+    turnSpeed = float(required_speed_kph[apex_idx])
+
+    # 방향 판단: 실제로 속도를 제한하는 지점 기준. 전방에 유의미한 커브가 없어
+    # 해당 지점도 사실상 무제한(커브 없음)이면 근거리 가중합으로 대체한다.
+    if point_curve[apex_idx] > 1e-8:
+      curv_direction = np.sign(lookahead_rate[apex_idx])
+    else:
+      weights = np.clip(1.0 - 0.55 * (lookahead_t / max(self.vturn_lookahead_horizon_s, 0.1)), 0.45, 1.0)
+      curv_direction = np.sign(np.sum(lookahead_rate * weights))
     if curv_direction == 0:
       curv_direction = np.sign(orientation_rate[0]) if orientation_rate[0] != 0 else 1.0
 
-    max_pred_lat_acc = float(np.max(future_lat_acc))
-    max_curve = max_pred_lat_acc / (v_ego**2) if max_pred_lat_acc > 0.0 else 1e-6
-
-    adjusted_target_lat_a = TARGET_LAT_A * self.autoCurveSpeedAggressiveness
-    turnSpeed = max(abs(adjusted_target_lat_a / max_curve)**0.5 * 3.6, 5.0)
-    turnSpeed = min(turnSpeed, 250.0)
-
-    # ---- 반응속도 제한 (1차 저역통과 필터) ----
-    # 별도의 '곡선 진입/탈출 이벤트' 판정이나 지연(hold) 로직을 두지 않는다.
-    # turnSpeed는 위에서 항상 전방예측(lookahead) 기반으로 매 프레임 새로 계산되므로,
-    # 곡선 정점을 지나 남은 구간이 줄어들면 max_pred_lat_acc가 자연스럽게 낮아지고
-    # turnSpeed가 올라가기 시작한다 -> 물리적으로 곡선을 완전히 빠져나오기 전부터
-    # 가속이 시작되는 주행감이 된다. 여기서는 모델 프레임 노이즈로 인한 잔떨림만
-    # 제거하는 저역통과 필터만 적용한다(감속/가속 시정수를 다르게 두어 감속은
-    # 좀 더 민첩하게, 가속 복귀는 좀 더 부드럽게).
+    # ---- 저역통과 필터 ----
+    # 감속/가속의 '모양'(미리 서서히 감속, 벗어나는 즉시 해제)은 이미 위의 거리기반
+    # 물리공식이 만들어내므로, 여기서는 모델 프레임 노이즈로 인한 잔떨림만 제거한다.
+    # 별도의 '진입/탈출 이벤트' 판정이나 지연(hold) 로직은 두지 않는다.
     dt = 1.0 / 20.0  # carrot_man 브로드캐스트 루프 주기 (Ratekeeper(20))
     if np.isfinite(self.vturn_last_speed):
       rc = self.vturn_decel_rc if turnSpeed < self.vturn_last_speed else self.vturn_accel_rc
