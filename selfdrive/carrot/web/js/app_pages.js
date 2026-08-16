@@ -1548,7 +1548,19 @@ function initToolsPage() {
 
   bindOnce("btnGitPull", async () => {
     try {
-      await runTool("git_pull");
+      const result = await runTool("git_pull");
+      const output = result.out || "";
+      
+      // "Already up to date"가 없으면 업데이트가 진행된 것이므로 재부팅 알림 표시
+      if (!output.includes("Already up to date")) {
+        const ok = await appConfirm(
+          UI_STRINGS[LANG].confirm_reboot || "지금 재부팅하시겠습니까?",
+          { title: UI_STRINGS[LANG].reboot || "재부팅" }
+        );
+        if (ok) {
+          await runTool("reboot");
+        }
+      }
     } catch (e) {
       showError("git_pull", e);
     }
