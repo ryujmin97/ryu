@@ -310,8 +310,14 @@ class CarrotPlanner:
       self.desireStateCount = 0
 
     # 차선변경이 막 끝난 순간을 감지해서 tFollow 복귀 지연(hold) 카운트다운 시작
+    # NOTE: hold_steps만 넣으면 hold_steps < blend_steps인 경우(기본 1.0s < 1.5s)
+    # dynamic_t_follow의 "hold_cnt > blend_total" 판정이 처음부터 False가 되어
+    # hold 구간 없이 곧바로 blend가 시작되는 버그가 있었음. hold+blend 합산 카운트를
+    # 넣어야 "먼저 hold_steps만큼 고정 -> 이후 blend_steps에 걸쳐 복귀"가 실제로 동작함.
     if self._lc_active_prev and not lc_active:
-      self._lc_post_hold_cnt = int(self.tFollowLaneChangeHoldTime / DT_MDL)
+      hold_steps = int(self.tFollowLaneChangeHoldTime / DT_MDL)
+      blend_steps = max(1, int(self.tFollowLaneChangeBlendTime / DT_MDL))
+      self._lc_post_hold_cnt = hold_steps + blend_steps
     self._lc_active_prev = lc_active
 
 
