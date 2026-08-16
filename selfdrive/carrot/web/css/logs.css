@@ -54,6 +54,59 @@
   color: var(--md-error);
 }
 
+.logs-gdrive-log {
+  margin-bottom: var(--sp-md);
+  padding: var(--sp-sm) var(--sp-md);
+  background: var(--md-surface-cont);
+  border-radius: var(--r-lg);
+}
+
+.logs-gdrive-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: var(--sp-sm);
+}
+
+.logs-gdrive-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 0.9em;
+}
+
+.logs-gdrive-log-entry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--md-stroke-soft);
+}
+
+.logs-gdrive-log-entry:last-child {
+  border-bottom: none;
+}
+
+.logs-gdrive-log-entry.is-success .logs-gdrive-log-name {
+  color: var(--md-primary);
+}
+
+.logs-gdrive-log-entry.is-error .logs-gdrive-log-name {
+  color: var(--md-error);
+}
+
+.logs-gdrive-log-time {
+  color: var(--md-on-surface-var);
+}
+
+.logs-gdrive-log-entry a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .logs-toolbar {
   display: flex;
   align-items: center;

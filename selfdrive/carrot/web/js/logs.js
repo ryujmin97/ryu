@@ -43,6 +43,66 @@ function logsSetStatus(message, tone = "") {
   el.classList.toggle("is-error", tone === "error");
 }
 
+// ---------------------------------------------------------------------------
+// Drive 업로드 로그 — 완료 시 사라지는 토스트 대신, 페이지에 누적되는
+// 로그로 남긴다. localStorage에 저장해 페이지를 벗어났다 돌아와도 유지.
+// ---------------------------------------------------------------------------
+const GDRIVE_LOG_KEY = "carrotweb_gdrive_upload_log";
+const GDRIVE_LOG_MAX = 50;
+
+function loadGdriveUploadLog() {
+  try {
+    const raw = localStorage.getItem(GDRIVE_LOG_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveGdriveUploadLog(list) {
+  try {
+    localStorage.setItem(GDRIVE_LOG_KEY, JSON.stringify(list.slice(0, GDRIVE_LOG_MAX)));
+  } catch (e) {
+    // 저장 실패해도 화면 표시에는 지장 없으므로 무시
+  }
+}
+
+function renderGdriveUploadLog() {
+  const host = document.getElementById("logsGdriveLog");
+  const list = document.getElementById("logsGdriveLogList");
+  if (!host || !list) return;
+  const entries = loadGdriveUploadLog();
+  if (!entries.length) {
+    host.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  host.hidden = false;
+  list.innerHTML = entries.map((entry) => {
+    const tone = entry.status === "success" ? "is-success" : "is-error";
+    const time = entry.ts ? new Date(entry.ts).toLocaleString() : "";
+    const linkHtml = entry.link ? ` <a href="${escapeHtml(entry.link)}" target="_blank" rel="noopener">열기</a>` : "";
+    return `<div class="logs-gdrive-log-entry ${tone}">` +
+      `<span class="logs-gdrive-log-time">${escapeHtml(time)}</span>` +
+      `<span class="logs-gdrive-log-name">${escapeHtml(entry.name || "")}</span>` +
+      `<span class="logs-gdrive-log-msg">${escapeHtml(entry.message || "")}</span>` +
+      `${linkHtml}</div>`;
+  }).join("");
+}
+
+function addGdriveUploadLog(entry) {
+  const list = loadGdriveUploadLog();
+  list.unshift({ ...entry, ts: Date.now() });
+  saveGdriveUploadLog(list);
+  renderGdriveUploadLog();
+}
+
+function clearGdriveUploadLog() {
+  saveGdriveUploadLog([]);
+  renderGdriveUploadLog();
+}
+
 function logsSwitchTab(tab) {
   logsState.activeTab = tab;
   const tabDashcam = document.getElementById("logsTabDashcam");
@@ -464,15 +524,22 @@ async function triggerGdriveAuth() {
   }
 }
 
-async function pollGdriveUploadJob(jobId, itemLabel) {
+async function pollGdriveUploadJob(jobId, indexInfo) {
   // core.py의 tools job 폴링과 같은 패턴: 완료될 때까지 짧은 간격으로 조회.
+  // indexInfo = { index, total } — 현재 몇 번째 파일인지 + 배치 전체 진행률
+  // 계산에 사용. 배치 진행률은 "완료된 파일 수 + 현재 파일 진행률"을
+  // 전체 파일 수로 나눈 값(파일 개수 기준 가중 평균)이다. 파일마다
+  // 크기가 달라 바이트 기준 정확한 값은 아니지만, 업로드 시작 전 모든
+  // 파일 크기를 미리 조회하지 않고도 계산 가능한 근사치로 충분하다.
   while (true) {
     const r = await fetch(`/api/gdrive/job?id=${encodeURIComponent(jobId)}`);
     const snap = await r.json();
     if (!snap || !snap.ok) throw new Error((snap && snap.error) || "job not found");
     if (!snap.done) {
-      const pct = (snap.total && typeof snap.percent === "number") ? ` ${snap.percent}%` : "";
-      logsSetStatus(`${itemLabel} 업로드 중... ${snap.message || ""}${pct}`.trim());
+      const filePct = (snap.total && typeof snap.percent === "number") ? snap.percent : 0;
+      const { index, total } = indexInfo;
+      const overallPct = Math.round((((index - 1) + filePct / 100) / total) * 100);
+      logsSetStatus(`업로드 중(${index}/${total})... ${overallPct}%`);
       await new Promise((resolve) => setTimeout(resolve, 500));
       continue;
     }
@@ -491,9 +558,12 @@ async function uploadSelectedFiles(kind) {
     return;
   }
 
+  const total = payloads.length;
+  let index = 0;
   for (const item of payloads) {
+    index += 1;
     const body = kind === "dashcam" ? { kind: "dashcam", segment: item } : { kind: "screenrecord", file_id: item };
-    logsSetStatus(`${item} 업로드 준비 중...`);
+    logsSetStatus(`업로드 중(${index}/${total})... 준비 중...`);
     try {
       const r = await fetch("/api/gdrive/upload", {
         method: "POST",
@@ -502,11 +572,20 @@ async function uploadSelectedFiles(kind) {
       });
       const j = await r.json();
       if (!j || !j.ok) throw new Error(j?.error || "업로드 실패");
-      const snap = await pollGdriveUploadJob(j.job_id, item);
+      const snap = await pollGdriveUploadJob(j.job_id, { index, total });
       if (snap.status !== "done") throw new Error(snap.error || "업로드 실패");
-      showAppToast(`${item} 업로드 완료`, { tone: "success" });
+      addGdriveUploadLog({
+        name: item,
+        status: "success",
+        message: `업로드 완료(${index}/${total})`,
+        link: snap.result && snap.result.link,
+      });
     } catch (e) {
-      showAppToast(`${item} 업로드 실패: ${e?.message || e}`, { tone: "error" });
+      addGdriveUploadLog({
+        name: item,
+        status: "error",
+        message: `업로드 실패(${index}/${total}): ${e?.message || e}`,
+      });
       break;
     }
   }
@@ -543,6 +622,9 @@ function bindLogsEvents() {
   const btnGdriveAuth = document.getElementById("btnGdriveAuth");
   if (btnGdriveAuth) btnGdriveAuth.onclick = triggerGdriveAuth;
 
+  const btnGdriveLogClear = document.getElementById("btnGdriveLogClear");
+  if (btnGdriveLogClear) btnGdriveLogClear.onclick = clearGdriveUploadLog;
+
   const dashcamRoutesHost = document.getElementById("dashcamRoutes");
   if (dashcamRoutesHost) {
     dashcamRoutesHost.addEventListener("click", (ev) => {
@@ -574,5 +656,6 @@ function bindLogsEvents() {
 function initLogsPage() {
   bindLogsEvents();
   loadGdriveStatus();
+  renderGdriveUploadLog();
   logsSwitchTab(logsState.activeTab || "dashcam");
 }
