@@ -17,6 +17,7 @@ import mimetypes
 import os
 import threading
 import time
+import uuid
 import zipfile
 from datetime import datetime
 from typing import Any
@@ -44,6 +45,13 @@ DASHCAM_ARTIFACT_NAMES = {
   "rlog": ("rlog.zst", "rlog.bz2", "rlog"),
   "qlog": ("qlog.zst", "qlog.bz2", "qlog"),
 }
+
+# Drive 업로드용 라우트 zip을 만드는 임시 폴더. /tmp는 comma 기기에서
+# RAM 기반 tmpfs라 대용량 라우트(세그먼트 여러 개, 영상 수백MB~GB)를
+# 그대로 쓰면 메모리 부족을 유발할 수 있다. 대시캠 데이터와 같은 디스크
+# 파티션(/data/media/0) 아래에 만들어 디스크 공간만 사용하게 한다.
+DRIVE_TMP_DIR = "/data/media/0/.carrotweb_gdrive_tmp"
+DRIVE_TMP_MAX_AGE_SEC = 6 * 3600  # 업로드 실패 등으로 남은 임시 zip 정리 기준
 
 ROUTE_CACHE_TTL = 3.0
 DASHCAM_ROUTE_LIMIT_DEFAULT = 40
@@ -370,6 +378,71 @@ async def api_dashcam_download_zip(request: web.Request) -> web.StreamResponse:
 
 
 # ---------------------------------------------------------------------------
+# Drive 업로드용 라우트 zip 생성
+#
+# 대시캠은 세그먼트 파일(qcamera/rlog/qlog)을 원본 그대로 올리지 않고,
+# 먼저 세그먼트 단위로 압축한 뒤 같은 라우트에 속한 세그먼트들을 하나의
+# 라우트 zip으로 묶어서 전송한다. (세그먼트가 1개뿐인 라우트는 결과적으로
+# 세그먼트 zip과 동일하다.)
+# ---------------------------------------------------------------------------
+def _cleanup_old_drive_tmp() -> None:
+  try:
+    if not os.path.isdir(DRIVE_TMP_DIR):
+      return
+    now = time.time()
+    with os.scandir(DRIVE_TMP_DIR) as it:
+      for entry in it:
+        try:
+          if entry.is_file() and (now - entry.stat().st_mtime) > DRIVE_TMP_MAX_AGE_SEC:
+            os.remove(entry.path)
+        except OSError:
+          continue
+  except Exception:
+    pass
+
+
+def _build_dashcam_route_zip(route: str, segments: list[str]) -> tuple[str, str]:
+  """선택된 세그먼트들(동일 라우트)을 세그먼트별 폴더로 담아 하나의
+  라우트 zip으로 디스크에 직접 써서 만든다. BytesIO(메모리)가 아니라
+  파일에 바로 쓰기 때문에 세그먼트가 많거나 큰 라우트도 메모리를 크게
+  잡아먹지 않는다. 반환된 zip 경로는 업로드 후 호출자가 삭제해야 한다."""
+  safe_segments = [safe_segment(str(s)) for s in segments][:400]  # 안전 상한
+  if not safe_segments:
+    raise web.HTTPBadRequest(text="missing segments")
+
+  os.makedirs(DRIVE_TMP_DIR, exist_ok=True)
+  _cleanup_old_drive_tmp()
+
+  tmp_path = os.path.join(DRIVE_TMP_DIR, f"{uuid.uuid4().hex[:12]}.zip")
+  with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
+    for segment in safe_segments:
+      try:
+        seg_path = segment_dir(segment)
+      except web.HTTPException:
+        continue
+      try:
+        seg_mtime = int(os.path.getmtime(seg_path))
+      except OSError:
+        seg_mtime = 0
+      date_prefix = compact_datetime(seg_mtime)
+      for name in ("qcamera.mp4", "qcamera.ts", "rlog.zst", "rlog.bz2", "rlog", "qlog.zst", "qlog.bz2", "qlog"):
+        path = os.path.join(seg_path, name)
+        if os.path.isfile(path):
+          zf.write(path, arcname=f"{date_prefix}_{segment}/{name}")
+
+  route_mtime = 0
+  try:
+    route_mtime = int(os.path.getmtime(segment_dir(safe_segments[0])))
+  except Exception:
+    pass
+  date_prefix = compact_datetime(route_mtime)
+  suffix = "" if len(safe_segments) == 1 else f"_x{len(safe_segments)}seg"
+  safe_route = route.replace("/", "_").replace("\\", "_").strip() or "route"
+  filename = f"{date_prefix}_{safe_route}{suffix}.zip"
+  return tmp_path, filename
+
+
+# ---------------------------------------------------------------------------
 # 화면 녹화(screenrecord) 카탈로그 + API
 # ---------------------------------------------------------------------------
 def file_id(path: str) -> str:
@@ -483,18 +556,10 @@ async def api_screenrecord_download(request: web.Request) -> web.StreamResponse:
 # ---------------------------------------------------------------------------
 
 def _resolve_drive_upload_target(body: dict[str, Any]) -> tuple[str, str] | None:
-  """Drive로 보낼 파일의 (경로, 파일명)을 찾는다. 세그먼트 하나당 실제
-  존재하는 첫 아티팩트(qcamera 우선) 하나만 보낸다 (기존 동작 유지)."""
+  """Drive로 보낼 화면 녹화 파일의 (경로, 파일명)을 찾는다.
+  대시캠은 세그먼트를 라우트 zip으로 먼저 만들어야 해서 별도로
+  _build_dashcam_route_zip()에서 처리한다 (api_gdrive_upload 참고)."""
   kind = str(body.get("kind") or "").strip()
-  if kind == "dashcam":
-    segment = safe_segment(str(body.get("segment") or ""))
-    path = os.path.join(DASHCAM_ROOT, segment)
-    candidates = ["qcamera.mp4", "qcamera.ts", "rlog.zst", "rlog.bz2", "rlog", "qlog.zst", "qlog.bz2", "qlog"]
-    for name in candidates:
-      full = os.path.join(path, name)
-      if os.path.isfile(full):
-        return full, f"{segment}_{name}"
-    return None
   if kind == "screenrecord":
     file_id_in = str(body.get("file_id") or "").strip()
     if not file_id_in:
@@ -509,7 +574,14 @@ def _resolve_drive_upload_target(body: dict[str, Any]) -> tuple[str, str] | None
 
 
 async def api_gdrive_upload(request: web.Request) -> web.Response:
-  """선택한 파일 하나를 Google Drive로 업로드 시작 (비동기 job).
+  """선택 항목 하나를 Google Drive로 업로드 시작 (비동기 job).
+
+  - kind == "dashcam": body에 {route, segments:[...]} 필요. 같은 라우트에
+    속한 선택된 세그먼트들을 먼저 라우트 zip으로 압축한 뒤(세그먼트가
+    1개면 사실상 세그먼트 zip과 동일) 그 zip 파일을 업로드한다. zip
+    생성 자체도 시간이 걸릴 수 있어(대용량 라우트) job 메시지로
+    "압축 중..." 단계를 알려준다.
+  - kind == "screenrecord": 기존과 동일하게 파일 하나를 그대로 업로드.
 
   업로드는 시간이 걸릴 수 있어(대용량 영상) 요청을 기다리지 않고 즉시
   job_id를 반환한다. 진행률은 GET /api/gdrive/job?id=... 로 폴링한다.
@@ -522,6 +594,42 @@ async def api_gdrive_upload(request: web.Request) -> web.Response:
 
   if not gdrive.is_connected():
     return web.json_response({"ok": False, "error": "google_drive_not_connected"}, status=401)
+
+  kind = str(payload.get("kind") or "").strip()
+
+  if kind == "dashcam":
+    route = str(payload.get("route") or "").strip()
+    segments_in = payload.get("segments")
+    if not route or not isinstance(segments_in, list) or not segments_in:
+      return web.json_response({"ok": False, "error": "missing route/segments"}, status=400)
+    segments_in = [str(s) for s in segments_in]
+
+    job = gdrive.create_job()
+
+    async def _run_dashcam() -> None:
+      tmp_path: str | None = None
+      try:
+        gdrive.set_job_message(job, f"세그먼트 {len(segments_in)}개 압축 중...")
+        tmp_path, filename = await asyncio.to_thread(_build_dashcam_route_zip, route, segments_in)
+        result = await gdrive.upload_file_resumable(tmp_path, filename, job=job)
+        gdrive.finish_job(job, ok=True, result={
+          "name": result.get("name"),
+          "link": result.get("webViewLink"),
+          "size": result.get("size"),
+        })
+      except web.HTTPException as e:
+        gdrive.finish_job(job, ok=False, error=e.text or "bad request")
+      except Exception as e:
+        gdrive.finish_job(job, ok=False, error=str(e) or type(e).__name__)
+      finally:
+        if tmp_path:
+          try:
+            os.remove(tmp_path)
+          except OSError:
+            pass
+
+    asyncio.create_task(_run_dashcam())
+    return web.json_response({"ok": True, "job_id": job["id"]})
 
   resolved = _resolve_drive_upload_target(payload)
   if not resolved:

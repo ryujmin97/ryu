@@ -526,11 +526,11 @@ async function triggerGdriveAuth() {
 
 async function pollGdriveUploadJob(jobId, indexInfo) {
   // core.py의 tools job 폴링과 같은 패턴: 완료될 때까지 짧은 간격으로 조회.
-  // indexInfo = { index, total } — 현재 몇 번째 파일인지 + 배치 전체 진행률
-  // 계산에 사용. 배치 진행률은 "완료된 파일 수 + 현재 파일 진행률"을
-  // 전체 파일 수로 나눈 값(파일 개수 기준 가중 평균)이다. 파일마다
-  // 크기가 달라 바이트 기준 정확한 값은 아니지만, 업로드 시작 전 모든
-  // 파일 크기를 미리 조회하지 않고도 계산 가능한 근사치로 충분하다.
+  // indexInfo = { index, total } — 현재 몇 번째 업로드 단위인지(대시캠은
+  // 라우트 1건, 화면녹화는 파일 1건) + 배치 전체 진행률 계산에 사용.
+  // 배치 진행률은 "완료된 단위 수 + 현재 단위 진행률"을 전체 단위 수로
+  // 나눈 값(개수 기준 가중 평균)이다. 업로드 시작 전 모든 크기를 미리
+  // 조회하지 않고도 계산 가능한 근사치로 충분하다.
   while (true) {
     const r = await fetch(`/api/gdrive/job?id=${encodeURIComponent(jobId)}`);
     const snap = await r.json();
@@ -539,7 +539,8 @@ async function pollGdriveUploadJob(jobId, indexInfo) {
       const filePct = (snap.total && typeof snap.percent === "number") ? snap.percent : 0;
       const { index, total } = indexInfo;
       const overallPct = Math.round((((index - 1) + filePct / 100) / total) * 100);
-      logsSetStatus(`업로드 중(${index}/${total})... ${overallPct}%`);
+      const stage = snap.message ? ` (${snap.message})` : "";
+      logsSetStatus(`업로드 중(${index}/${total})... ${overallPct}%${stage}`);
       await new Promise((resolve) => setTimeout(resolve, 500));
       continue;
     }
@@ -547,42 +548,69 @@ async function pollGdriveUploadJob(jobId, indexInfo) {
   }
 }
 
+function groupSelectedDashcamByRoute() {
+  // 선택된 세그먼트를 같은 라우트끼리 묶는다. 백엔드가 이 묶음 하나를
+  // 라우트 zip 하나로 압축해 전송하므로(세그먼트가 1개면 결과적으로
+  // 세그먼트 zip과 동일), 업로드 단위 = 라우트 1건이 된다.
+  const groups = [];
+  for (const route of logsState.dashcamRoutes) {
+    const segments = (route.segmentFolders || []).filter((s) => logsState.dashcamSelected.has(s));
+    if (!segments.length) continue;
+    const title = (route.title || route.route || "").trim() || route.route;
+    groups.push({ route: route.route, segments, label: `${title}(${segments.length}세그먼트)` });
+  }
+  return groups;
+}
+
 async function uploadSelectedFiles(kind) {
   if (!logsState.gdrive.connected) {
     showAppToast("Google Drive 연결이 필요합니다", { tone: "error" });
     return;
   }
-  const payloads = kind === "dashcam" ? Array.from(logsState.dashcamSelected) : Array.from(logsState.screenrecordSelected);
-  if (!payloads.length) {
+
+  // 업로드 단위:
+  // - 대시캠: 선택된 세그먼트를 라우트별로 묶어 "라우트 1건"이 업로드
+  //   1건이 된다(백엔드에서 세그먼트별 압축 -> 라우트 zip으로 결합).
+  // - 화면녹화: 기존과 동일하게 선택 파일 1개 = 업로드 1건.
+  const units = kind === "dashcam"
+    ? groupSelectedDashcamByRoute().map((g) => ({
+        label: g.label,
+        body: { kind: "dashcam", route: g.route, segments: g.segments },
+      }))
+    : Array.from(logsState.screenrecordSelected).map((item) => ({
+        label: item,
+        body: { kind: "screenrecord", file_id: item },
+      }));
+
+  if (!units.length) {
     showAppToast("업로드할 파일을 선택하세요", { tone: "error" });
     return;
   }
 
-  const total = payloads.length;
+  const total = units.length;
   let index = 0;
-  for (const item of payloads) {
+  for (const unit of units) {
     index += 1;
-    const body = kind === "dashcam" ? { kind: "dashcam", segment: item } : { kind: "screenrecord", file_id: item };
     logsSetStatus(`업로드 중(${index}/${total})... 준비 중...`);
     try {
       const r = await fetch("/api/gdrive/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(unit.body),
       });
       const j = await r.json();
       if (!j || !j.ok) throw new Error(j?.error || "업로드 실패");
       const snap = await pollGdriveUploadJob(j.job_id, { index, total });
       if (snap.status !== "done") throw new Error(snap.error || "업로드 실패");
       addGdriveUploadLog({
-        name: item,
+        name: unit.label,
         status: "success",
         message: `업로드 완료(${index}/${total})`,
         link: snap.result && snap.result.link,
       });
     } catch (e) {
       addGdriveUploadLog({
-        name: item,
+        name: unit.label,
         status: "error",
         message: `업로드 실패(${index}/${total}): ${e?.message || e}`,
       });
