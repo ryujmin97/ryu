@@ -9,7 +9,6 @@ import threading
 import time
 import numpy as np
 import zmq
-import time as time_module
 from datetime import datetime
 import traceback
 from typing import Any, Dict, List, Optional
@@ -27,6 +26,7 @@ import cereal.messaging as messaging
 from openpilot.common.realtime import Ratekeeper, set_core_affinity
 from openpilot.common.params import Params
 from openpilot.common.filter_simple import MyMovingAverage
+from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.system.hardware import PC, TICI
 from openpilot.selfdrive.navd.helpers import Coordinate
 from opendbc.car.common.conversions import Conversions as CV
@@ -214,10 +214,13 @@ class CarrotMan:
 
     self.turn_speed_last = 250
     self.vturn_last_speed = 250.0
-    self.vturn_lookahead_steps = 20  # 4~5초 lookahead (20 frames @ ~5Hz)
-    self.vturn_curve_active = False
-    self.vturn_curve_exit_time = 0
-    self.vturn_curve_exit_recovery_duration = 2.0  # 곡선 종료 후 2초간 가속 회복
+    self.vturn_lookahead_horizon_s = 4.5  # 진입 조기감속용 예측 구간(초). T_IDXS가 비선형이라 '초' 기준으로 계산한다.
+    # 감속/가속 반응 시정수(초, 1차 저역통과 필터). 감속은 안전을 위해 빠르게, 가속 복귀는 부드럽게.
+    # 별도의 '진입/탈출 이벤트' 판정이나 지연(hold) 로직을 두지 않는다 - turnSpeed는 항상
+    # 전방예측(lookahead) 기반으로 매 프레임 재계산되므로, 곡선 정점을 지나 남은 구간이
+    # 줄어들면 물리적으로 곡선을 완전히 빠져나오기 전부터 자연스럽게 가속이 시작된다.
+    self.vturn_decel_rc = 0.25
+    self.vturn_accel_rc = 0.6
     self.curvatureFilter = MyMovingAverage(20)
     self.carrot_curve_speed_params()
 
@@ -917,8 +920,7 @@ class CarrotMan:
 
   def vturn_speed(self, CS, sm):
     TARGET_LAT_A = 1.6  # m/s^2
-    CURVE_THRESHOLD = 0.015  # 곡선 활성 임계값 (yaw rate)
-    
+
     modelData = sm['modelV2']
     v_ego = max(CS.vEgo, 0.1)
 
@@ -934,50 +936,51 @@ class CarrotMan:
     if len(orientation_rate) == 0:
       return 250.0
 
-    # 4~5초 lookahead (20 frames) - 곡선을 더 미리 감지
-    lookahead_steps = max(5, min(len(orientation_rate), self.vturn_lookahead_steps))
+    # 진입 조기감속용 예측 구간을 '초' 단위로 산정한다. ModelConstants.T_IDXS는
+    # 뒤로 갈수록 간격이 넓어지는 비선형(2차) 배열이므로, 인덱스 개수를 고정하면
+    # 실제 예측 시간이 모델 프레임 수에 따라 달라진다.
+    n_pts = min(len(orientation_rate), ModelConstants.IDX_N)
+    t_idxs = np.array(ModelConstants.T_IDXS[:n_pts])
+    within_horizon = np.count_nonzero(t_idxs <= self.vturn_lookahead_horizon_s)
+    lookahead_steps = max(5, min(n_pts, within_horizon))
+
     lookahead_rate = orientation_rate[:lookahead_steps]
     lookahead_vel = velocity[:lookahead_steps]
+    lookahead_t = t_idxs[:lookahead_steps]
 
     if len(lookahead_rate) > 1:
-      weights = np.linspace(1.0, 0.2, len(lookahead_rate))  # 더 완만한 가중치
+      # 시간 기준 가중치: 가까운 시점을 더 신뢰하되, 먼 시점(4~5초 전방)도 충분한
+      # 비중(최소 0.45)을 유지해 조기감속 취지가 죽지 않게 한다.
+      weights = np.clip(1.0 - 0.55 * (lookahead_t / max(self.vturn_lookahead_horizon_s, 0.1)), 0.45, 1.0)
       future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel) * weights
+      curv_direction = np.sign(np.sum(lookahead_rate * weights))
     else:
       future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel)
+      curv_direction = np.sign(lookahead_rate[0]) if len(lookahead_rate) else 0.0
+
+    if curv_direction == 0:
+      curv_direction = np.sign(orientation_rate[0]) if orientation_rate[0] != 0 else 1.0
 
     max_pred_lat_acc = float(np.max(future_lat_acc))
     max_curve = max_pred_lat_acc / (v_ego**2) if max_pred_lat_acc > 0.0 else 1e-6
-    
-    curv_direction = np.sign(np.sum(lookahead_rate))
-    if curv_direction == 0:
-      curv_direction = np.sign(orientation_rate[0]) if orientation_rate[0] != 0 else 1.0
 
     adjusted_target_lat_a = TARGET_LAT_A * self.autoCurveSpeedAggressiveness
     turnSpeed = max(abs(adjusted_target_lat_a / max_curve)**0.5 * 3.6, 5.0)
     turnSpeed = min(turnSpeed, 250.0)
 
-    # 곡선 활성 상태 추적
-    current_curve_active = max(np.abs(lookahead_rate)) > CURVE_THRESHOLD
-    
-    # 곡선 종료 감지 - 곡선이 활성 상태에서 비활성으로 전환
-    if self.vturn_curve_active and not current_curve_active:
-      self.vturn_curve_exit_time = time.time()
-    
-    self.vturn_curve_active = current_curve_active
-    
-    # 곡선 종료 후 가속 회복 로직
-    time_since_curve_exit = time.time() - self.vturn_curve_exit_time if self.vturn_curve_exit_time > 0 else float('inf')
-    if time_since_curve_exit < self.vturn_curve_exit_recovery_duration:
-      # 곡선 종료 후 2초 동안 점진적으로 속도 회복
-      recovery_ratio = time_since_curve_exit / self.vturn_curve_exit_recovery_duration
-      turnSpeed = turnSpeed + (self.vturn_last_speed - turnSpeed) * (1.0 - recovery_ratio) * 0.5
-    
-    # 급격한 속도 차단을 줄이고, 예측형 반응이 더 부드럽게 동작하도록 마지막 속도를 유지
+    # ---- 반응속도 제한 (1차 저역통과 필터) ----
+    # 별도의 '곡선 진입/탈출 이벤트' 판정이나 지연(hold) 로직을 두지 않는다.
+    # turnSpeed는 위에서 항상 전방예측(lookahead) 기반으로 매 프레임 새로 계산되므로,
+    # 곡선 정점을 지나 남은 구간이 줄어들면 max_pred_lat_acc가 자연스럽게 낮아지고
+    # turnSpeed가 올라가기 시작한다 -> 물리적으로 곡선을 완전히 빠져나오기 전부터
+    # 가속이 시작되는 주행감이 된다. 여기서는 모델 프레임 노이즈로 인한 잔떨림만
+    # 제거하는 저역통과 필터만 적용한다(감속/가속 시정수를 다르게 두어 감속은
+    # 좀 더 민첩하게, 가속 복귀는 좀 더 부드럽게).
+    dt = 1.0 / 20.0  # carrot_man 브로드캐스트 루프 주기 (Ratekeeper(20))
     if np.isfinite(self.vturn_last_speed):
-      if turnSpeed < self.vturn_last_speed:
-        turnSpeed = min(turnSpeed, self.vturn_last_speed * 0.90)  # 감속 더 부드럽게
-      else:
-        turnSpeed = max(turnSpeed, self.vturn_last_speed * 1.08)  # 가속 더 빠르게
+      rc = self.vturn_decel_rc if turnSpeed < self.vturn_last_speed else self.vturn_accel_rc
+      alpha = dt / (rc + dt)
+      turnSpeed = self.vturn_last_speed + (turnSpeed - self.vturn_last_speed) * alpha
     self.vturn_last_speed = float(turnSpeed)
 
     return turnSpeed * curv_direction
