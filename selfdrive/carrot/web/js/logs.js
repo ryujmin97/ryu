@@ -170,6 +170,7 @@ function renderDashcamRoutes() {
     const segments = route.segmentFolders || [];
     const segmentDetails = route.segments || [];
     const selectedCount = dashcamSelectedCountFor(route.route);
+    const routeAllSelected = segments.length > 0 && selectedCount === segments.length;
     const title = escapeHtml((route.title || route.route || "").replace(/^0+(?=\d{3})/, ""));
 
     const segmentsHtml = expanded
@@ -197,15 +198,20 @@ function renderDashcamRoutes() {
 
     return `
       <div class="dashcam-route" data-route="${escapeHtml(route.route)}">
-        <button type="button" class="dashcam-route__head" data-toggle-route="${escapeHtml(route.route)}">
-          <div class="dashcam-route__title">${title}</div>
-          <div class="dashcam-route__meta muted">
-            <span>세그먼트 ${route.segmentCount ?? segments.length}개</span>
-            <span>${escapeHtml(route.dateLabel || "")}</span>
-            <span>${escapeHtml(route.latestModifiedLabel || "")}</span>
-            ${selectedCount ? `<span class="dashcam-route__selected">선택 ${selectedCount}개</span>` : ""}
-          </div>
-        </button>
+        <div class="dashcam-route__head">
+          <label class="dashcam-route__check" title="라우트 전체 선택">
+            <input type="checkbox" class="logs-checkbox" data-route-select="${escapeHtml(route.route)}" ${routeAllSelected ? "checked" : ""} />
+          </label>
+          <button type="button" class="dashcam-route__toggle" data-toggle-route="${escapeHtml(route.route)}">
+            <div class="dashcam-route__title">${title}</div>
+            <div class="dashcam-route__meta muted">
+              <span>세그먼트 ${route.segmentCount ?? segments.length}개</span>
+              <span>${escapeHtml(route.dateLabel || "")}</span>
+              <span>${escapeHtml(route.latestModifiedLabel || "")}</span>
+              ${selectedCount ? `<span class="dashcam-route__selected">선택 ${selectedCount}개</span>` : ""}
+            </div>
+          </button>
+        </div>
         ${expanded ? `<div class="dashcam-route__body">${segmentsHtml}</div>` : ""}
       </div>`;
   }).join("");
@@ -220,6 +226,16 @@ function toggleDashcamRoute(route) {
 function toggleDashcamSegment(segment, checked) {
   if (checked) logsState.dashcamSelected.add(segment);
   else logsState.dashcamSelected.delete(segment);
+}
+
+function toggleDashcamRouteSelection(route, checked) {
+  // 라우트 앞 체크박스: 그 라우트에 속한 세그먼트 전체를 한 번에 선택/해제.
+  const entry = logsState.dashcamRoutes.find((r) => r.route === route);
+  if (!entry) return;
+  (entry.segmentFolders || []).forEach((s) => {
+    if (checked) logsState.dashcamSelected.add(s);
+    else logsState.dashcamSelected.delete(s);
+  });
 }
 
 function dashcamSelectAll() {
@@ -662,6 +678,12 @@ function bindLogsEvents() {
       }
     });
     dashcamRoutesHost.addEventListener("change", (ev) => {
+      const routeCheckbox = ev.target.closest("input[data-route-select]");
+      if (routeCheckbox) {
+        toggleDashcamRouteSelection(routeCheckbox.getAttribute("data-route-select"), routeCheckbox.checked);
+        renderDashcamRoutes();
+        return;
+      }
       const checkbox = ev.target.closest("input[data-segment]");
       if (checkbox) {
         toggleDashcamSegment(checkbox.getAttribute("data-segment"), checkbox.checked);
