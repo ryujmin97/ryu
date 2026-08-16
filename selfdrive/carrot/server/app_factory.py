@@ -1,7 +1,7 @@
 from aiohttp import web
 
 from .core import log_mw, on_startup, on_cleanup, WEB_DIR
-from . import routes_static, routes_api, routes_ws, routes_logs
+from . import routes_static, routes_api, routes_ws, routes_logs, gdrive
 
 
 def make_app() -> web.Application:
@@ -37,10 +37,12 @@ def make_app() -> web.Application:
   app.router.add_get("/api/screenrecord/videos", routes_logs.api_screenrecord_videos)
   app.router.add_get("/api/screenrecord/download/{file_id}", routes_logs.api_screenrecord_download)
 
-  # gdrive upload / auth
-  app.router.add_get("/api/gdrive/status", routes_logs.api_gdrive_status)
-  app.router.add_post("/api/gdrive/device", routes_logs.api_gdrive_device)
-  app.router.add_post("/api/gdrive/token", routes_logs.api_gdrive_token)
+  # gdrive upload / auth (OAuth·resumable 업로드 로직은 gdrive.py)
+  app.router.add_get("/api/gdrive/status", gdrive.api_gdrive_status)
+  app.router.add_post("/api/gdrive/device", gdrive.api_gdrive_device)
+  app.router.add_post("/api/gdrive/token", gdrive.api_gdrive_token)
+  app.router.add_post("/api/gdrive/disconnect", gdrive.api_gdrive_disconnect)
+  app.router.add_get("/api/gdrive/job", gdrive.api_gdrive_job)
   app.router.add_post("/api/gdrive/upload", routes_logs.api_gdrive_upload)
 
   # ws

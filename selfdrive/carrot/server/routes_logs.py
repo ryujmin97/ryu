@@ -13,14 +13,10 @@ selfdrive/carrot/server/features/dashcam, features/screenrecord 를
 import asyncio
 import hashlib
 import io
-import json
 import mimetypes
 import os
 import threading
 import time
-import urllib.parse
-import urllib.request
-import uuid
 import zipfile
 from datetime import datetime
 from typing import Any
@@ -58,23 +54,6 @@ _route_cache = {"time": 0.0, "routes": []}
 
 _video_cache_lock = threading.Lock()
 _video_cache = {"time": 0.0, "videos": []}
-
-GDRIVE_STATE = {
-  "connected": False,
-  "access_token": None,
-  "token_type": "Bearer",
-  "scope": "",
-  "expires_at": 0,
-  "client_id": "",
-  "client_secret": "",
-  "device_code": "",
-  "user_code": "",
-  "verification_uri": "",
-  "interval": 5,
-  "status": "disconnected",
-  "last_error": "",
-  "folder_id": "",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -492,157 +471,20 @@ async def api_screenrecord_download(request: web.Request) -> web.StreamResponse:
 
 
 # ---------------------------------------------------------------------------
-# Google Drive (Device Authorization Grant, minimal upload support)
+# Google Drive (Device Authorization Grant + resumable upload)
+#
+# OAuth/토큰/재개형(resumable) 업로드 로직은 server/gdrive.py로 분리했다
+# (c3-ms-web 브랜치에서 검증된 방식). 이 파일에는 dashcam/screenrecord
+# 파일 경로를 찾아 gdrive.py에 넘겨주는 부분만 남긴다.
+#
+# /api/gdrive/status, /api/gdrive/device, /api/gdrive/token,
+# /api/gdrive/disconnect, /api/gdrive/job 은 app_factory.py에서
+# gdrive.py의 함수로 직접 라우팅한다.
 # ---------------------------------------------------------------------------
 
-def _gdrive_status_payload() -> dict[str, Any]:
-  return {
-    "ok": True,
-    "connected": bool(GDRIVE_STATE["access_token"]),
-    "status": GDRIVE_STATE["status"],
-    "user_code": GDRIVE_STATE["user_code"],
-    "verification_uri": GDRIVE_STATE["verification_uri"],
-    "device_code": GDRIVE_STATE["device_code"],
-    "folder_id": GDRIVE_STATE["folder_id"],
-    "last_error": GDRIVE_STATE["last_error"],
-  }
-
-
-async def api_gdrive_status(request: web.Request) -> web.Response:
-  return web.json_response(_gdrive_status_payload())
-
-
-async def api_gdrive_device(request: web.Request) -> web.Response:
-  try:
-    payload = await request.json()
-  except Exception:
-    payload = {}
-
-  client_id = str(payload.get("client_id") or "").strip()
-  client_secret = str(payload.get("client_secret") or "").strip()
-  if not client_id:
-    return web.json_response({"ok": False, "error": "missing client_id"}, status=400)
-
-  GDRIVE_STATE["client_id"] = client_id
-  GDRIVE_STATE["client_secret"] = client_secret
-  GDRIVE_STATE["last_error"] = ""
-
-  data = urllib.parse.urlencode({
-    "client_id": client_id,
-    "scope": "https://www.googleapis.com/auth/drive.file",
-  }).encode("utf-8")
-  req = urllib.request.Request(
-    "https://oauth2.googleapis.com/device/code",
-    data=data,
-    headers={"Content-Type": "application/x-www-form-urlencoded"},
-    method="POST",
-  )
-  try:
-    def _do():
-      with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-    body = await asyncio.to_thread(_do)
-  except Exception as e:
-    GDRIVE_STATE["status"] = "error"
-    GDRIVE_STATE["last_error"] = str(e)
-    return web.json_response({"ok": False, "error": str(e)}, status=500)
-
-  GDRIVE_STATE["device_code"] = str(body.get("device_code") or "")
-  GDRIVE_STATE["user_code"] = str(body.get("user_code") or "")
-  GDRIVE_STATE["verification_uri"] = str(body.get("verification_uri") or "https://www.google.com/device")
-  GDRIVE_STATE["interval"] = int(body.get("interval") or 5)
-  GDRIVE_STATE["status"] = "pending"
-  return web.json_response({
-    "ok": True,
-    "device_code": GDRIVE_STATE["device_code"],
-    "user_code": GDRIVE_STATE["user_code"],
-    "verification_uri": GDRIVE_STATE["verification_uri"],
-    "interval": GDRIVE_STATE["interval"],
-    "status": GDRIVE_STATE["status"],
-  })
-
-
-async def api_gdrive_token(request: web.Request) -> web.Response:
-  """Device flow 토큰 폴링. 프론트가 5초 간격으로 이 엔드포인트를 반복
-  호출해야 사용자의 Google 승인 여부를 알 수 있다 (Google 쪽에서 알아서
-  push 해주지 않음 — device authorization grant는 클라이언트가 계속
-  물어봐야 하는 방식)."""
-  try:
-    payload = await request.json()
-  except Exception:
-    payload = {}
-
-  client_id = str(payload.get("client_id") or GDRIVE_STATE["client_id"] or "").strip()
-  client_secret = str(payload.get("client_secret") or GDRIVE_STATE["client_secret"] or "").strip()
-  device_code = str(payload.get("device_code") or GDRIVE_STATE["device_code"] or "").strip()
-  if not client_id or not device_code:
-    return web.json_response({"ok": False, "error": "missing client_id or device_code"}, status=400)
-
-  data = urllib.parse.urlencode({
-    "client_id": client_id,
-    "client_secret": client_secret,
-    "device_code": device_code,
-    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-  }).encode("utf-8")
-  req = urllib.request.Request(
-    "https://oauth2.googleapis.com/token",
-    data=data,
-    headers={"Content-Type": "application/x-www-form-urlencoded"},
-    method="POST",
-  )
-  try:
-    def _do():
-      with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-    body = await asyncio.to_thread(_do)
-  except urllib.error.HTTPError as e:
-    try:
-      err = json.loads(e.read().decode("utf-8"))
-    except Exception:
-      err = {"error": str(e)}
-    err_code = err.get("error") if isinstance(err, dict) else None
-    if err_code in ("authorization_pending", "slow_down"):
-      # 사용자가 아직 Google 화면에서 승인하지 않은 "정상" 상태.
-      # 이걸 에러로 취급하면 폴링 첫 시도에서 바로 status="error"가 되어
-      # 실제로 승인해도 절대 연결되지 않는다 (보고된 증상의 2차 원인).
-      return web.json_response({
-        "ok": True,
-        "connected": False,
-        "pending": True,
-        "status": GDRIVE_STATE["status"],
-      })
-    GDRIVE_STATE["status"] = "error"
-    GDRIVE_STATE["last_error"] = str(err)
-    return web.json_response({"ok": False, "error": err}, status=400)
-  except Exception as e:
-    GDRIVE_STATE["status"] = "error"
-    GDRIVE_STATE["last_error"] = str(e)
-    return web.json_response({"ok": False, "error": str(e)}, status=500)
-
-  access_token = str(body.get("access_token") or "")
-  refresh_token = str(body.get("refresh_token") or "")
-  expires_in = int(body.get("expires_in") or 3600)
-  if access_token:
-    GDRIVE_STATE["access_token"] = access_token
-    GDRIVE_STATE["token_type"] = str(body.get("token_type") or "Bearer")
-    GDRIVE_STATE["scope"] = str(body.get("scope") or "")
-    GDRIVE_STATE["expires_at"] = int(time.time()) + expires_in
-    GDRIVE_STATE["status"] = "connected"
-    GDRIVE_STATE["last_error"] = ""
-    if refresh_token:
-      GDRIVE_STATE["refresh_token"] = refresh_token
-  return web.json_response({
-    "ok": bool(access_token),
-    "connected": bool(access_token),
-    "pending": not access_token,
-    "status": GDRIVE_STATE["status"],
-    "message": "Google Drive 연결 완료" if access_token else "권한을 아직 승인하지 않았습니다",
-    "token": body,
-  })
-
-
-
-def _resolve_drive_payload(body: dict[str, Any]) -> tuple[str, str, str] | None:
+def _resolve_drive_upload_target(body: dict[str, Any]) -> tuple[str, str] | None:
+  """Drive로 보낼 파일의 (경로, 파일명)을 찾는다. 세그먼트 하나당 실제
+  존재하는 첫 아티팩트(qcamera 우선) 하나만 보낸다 (기존 동작 유지)."""
   kind = str(body.get("kind") or "").strip()
   if kind == "dashcam":
     segment = safe_segment(str(body.get("segment") or ""))
@@ -651,77 +493,53 @@ def _resolve_drive_payload(body: dict[str, Any]) -> tuple[str, str, str] | None:
     for name in candidates:
       full = os.path.join(path, name)
       if os.path.isfile(full):
-        return full, os.path.basename(full), segment
+        return full, f"{segment}_{name}"
     return None
   if kind == "screenrecord":
     file_id_in = str(body.get("file_id") or "").strip()
     if not file_id_in:
       return None
+    base_dir = next((d for d in SCREEN_RECORDING_DIRS if os.path.isdir(d)), SCREEN_RECORDING_DIRS[0])
     for video in build_screen_videos():
-      path = os.path.abspath(os.path.join(next((d for d in SCREEN_RECORDING_DIRS if os.path.isdir(d)), SCREEN_RECORDING_DIRS[0]), video.get("name", "")))
+      path = os.path.abspath(os.path.join(base_dir, video.get("name", "")))
       if file_id(path) == file_id_in and os.path.isfile(path):
-        return path, os.path.basename(path), file_id_in
+        return path, os.path.basename(path)
     return None
   return None
 
 
-def _upload_file_to_drive(file_path: str, filename: str, access_token: str, folder_id: str = "") -> dict[str, Any]:
-  if not os.path.isfile(file_path):
-    raise FileNotFoundError(file_path)
-
-  metadata = {"name": filename}
-  if folder_id:
-    metadata["parents"] = [folder_id]
-
-  boundary = uuid.uuid4().hex
-  file_bytes = open(file_path, "rb").read()
-  mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-  body = (
-    f"--{boundary}\r\n"
-    f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-    f"{json.dumps(metadata)}\r\n"
-    f"--{boundary}\r\n"
-    f"Content-Type: {mime_type}\r\n"
-    f"Content-Transfer-Encoding: binary\r\n\r\n"
-  ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
-
-  req = urllib.request.Request(
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-    data=body,
-    headers={
-      "Authorization": f"Bearer {access_token}",
-      "Content-Type": f"multipart/related; boundary={boundary}",
-    },
-    method="POST",
-  )
-  try:
-    with urllib.request.urlopen(req, timeout=120) as resp:
-      response_body = resp.read().decode("utf-8", errors="replace")
-      parsed = json.loads(response_body) if response_body else {}
-      return {"ok": True, "file_id": parsed.get("id"), "name": parsed.get("name") or filename, "webViewLink": parsed.get("webViewLink"), "drive": parsed}
-  except Exception as e:
-    raise RuntimeError(str(e))
-
-
 async def api_gdrive_upload(request: web.Request) -> web.Response:
+  """선택한 파일 하나를 Google Drive로 업로드 시작 (비동기 job).
+
+  업로드는 시간이 걸릴 수 있어(대용량 영상) 요청을 기다리지 않고 즉시
+  job_id를 반환한다. 진행률은 GET /api/gdrive/job?id=... 로 폴링한다.
+  """
+  from . import gdrive
   try:
     payload = await request.json()
   except Exception:
     payload = {}
 
-  token = str(GDRIVE_STATE.get("access_token") or "").strip()
-  if not token:
-    return web.json_response({"ok": False, "error": "Google Drive not connected"}, status=401)
+  if not gdrive.is_connected():
+    return web.json_response({"ok": False, "error": "google_drive_not_connected"}, status=401)
 
-  resolved = _resolve_drive_payload(payload)
+  resolved = _resolve_drive_upload_target(payload)
   if not resolved:
     return web.json_response({"ok": False, "error": "no upload target found"}, status=400)
 
-  file_path, filename, _ = resolved
-  try:
-    result = await asyncio.to_thread(_upload_file_to_drive, file_path, filename, token, GDRIVE_STATE.get("folder_id", ""))
-    return web.json_response({"ok": True, "result": result, "name": filename})
-  except Exception as e:
-    GDRIVE_STATE["status"] = "error"
-    GDRIVE_STATE["last_error"] = str(e)
-    return web.json_response({"ok": False, "error": str(e)}, status=500)
+  file_path, filename = resolved
+  job = gdrive.create_job()
+
+  async def _run() -> None:
+    try:
+      result = await gdrive.upload_file_resumable(file_path, filename, job=job)
+      gdrive.finish_job(job, ok=True, result={
+        "name": result.get("name"),
+        "link": result.get("webViewLink"),
+        "size": result.get("size"),
+      })
+    except Exception as e:
+      gdrive.finish_job(job, ok=False, error=str(e) or type(e).__name__)
+
+  asyncio.create_task(_run())
+  return web.json_response({"ok": True, "job_id": job["id"]})

@@ -464,6 +464,22 @@ async function triggerGdriveAuth() {
   }
 }
 
+async function pollGdriveUploadJob(jobId, itemLabel) {
+  // core.py의 tools job 폴링과 같은 패턴: 완료될 때까지 짧은 간격으로 조회.
+  while (true) {
+    const r = await fetch(`/api/gdrive/job?id=${encodeURIComponent(jobId)}`);
+    const snap = await r.json();
+    if (!snap || !snap.ok) throw new Error((snap && snap.error) || "job not found");
+    if (!snap.done) {
+      const pct = (snap.total && typeof snap.percent === "number") ? ` ${snap.percent}%` : "";
+      logsSetStatus(`${itemLabel} 업로드 중... ${snap.message || ""}${pct}`.trim());
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
+    return snap;
+  }
+}
+
 async function uploadSelectedFiles(kind) {
   if (!logsState.gdrive.connected) {
     showAppToast("Google Drive 연결이 필요합니다", { tone: "error" });
@@ -477,7 +493,7 @@ async function uploadSelectedFiles(kind) {
 
   for (const item of payloads) {
     const body = kind === "dashcam" ? { kind: "dashcam", segment: item } : { kind: "screenrecord", file_id: item };
-    logsSetStatus("Drive 업로드 중...");
+    logsSetStatus(`${item} 업로드 준비 중...`);
     try {
       const r = await fetch("/api/gdrive/upload", {
         method: "POST",
@@ -485,9 +501,9 @@ async function uploadSelectedFiles(kind) {
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (!j || !j.ok) {
-        throw new Error(j?.error || "업로드 실패");
-      }
+      if (!j || !j.ok) throw new Error(j?.error || "업로드 실패");
+      const snap = await pollGdriveUploadJob(j.job_id, item);
+      if (snap.status !== "done") throw new Error(snap.error || "업로드 실패");
       showAppToast(`${item} 업로드 완료`, { tone: "success" });
     } catch (e) {
       showAppToast(`${item} 업로드 실패: ${e?.message || e}`, { tone: "error" });
