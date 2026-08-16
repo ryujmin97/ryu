@@ -212,6 +212,8 @@ class CarrotMan:
     self.remote_addr = None
 
     self.turn_speed_last = 250
+    self.vturn_last_speed = 250.0
+    self.vturn_lookahead_steps = 8
     self.curvatureFilter = MyMovingAverage(20)
     self.carrot_curve_speed_params()
 
@@ -910,29 +912,53 @@ class CarrotMan:
     return self.vturn_speed(sm['carState'], sm)
 
   def vturn_speed(self, CS, sm):
-    TARGET_LAT_A = 1.9  # m/s^2
+    TARGET_LAT_A = 1.6  # m/s^2, 사전예측형 vturn을 위해 약간 더 보수적으로 설정
 
     modelData = sm['modelV2']
     v_ego = max(CS.vEgo, 0.1)
-    # Set the curve sensitivity
-    orientation_rate = np.array(modelData.orientationRate.z) * self.autoCurveSpeedFactor
-    velocity = np.array(modelData.velocity.x)
 
-    # Get the maximum lat accel from the model
-    max_index = np.argmax(np.abs(orientation_rate))
-    curv_direction = np.sign(orientation_rate[max_index])
-    max_pred_lat_acc = np.amax(np.abs(orientation_rate) * velocity)
+    orientation_rate = np.array(modelData.orientationRate.z, dtype=np.float64) * self.autoCurveSpeedFactor
+    velocity = np.array(modelData.velocity.x, dtype=np.float64)
 
-    # Get the maximum curve based on the current velocity
-    max_curve = max_pred_lat_acc / (v_ego**2)
+    if len(orientation_rate) == 0 or len(velocity) == 0:
+      return 250.0
 
-    # Set the target lateral acceleration
+    valid = np.isfinite(orientation_rate) & np.isfinite(velocity)
+    orientation_rate = orientation_rate[valid]
+    velocity = velocity[valid]
+    if len(orientation_rate) == 0:
+      return 250.0
+
+    # 곡선 진입/종료 시점을 더 미리 감지하도록, 현재값만 보는 대신 앞쪽 예측 구간을 우선 검토
+    lookahead_steps = max(3, min(len(orientation_rate), self.vturn_lookahead_steps))
+    lookahead_rate = orientation_rate[:lookahead_steps]
+    lookahead_vel = velocity[:lookahead_steps]
+
+    if len(lookahead_rate) > 1:
+      weights = np.linspace(1.0, 0.35, len(lookahead_rate))
+      future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel) * weights
+    else:
+      future_lat_acc = np.abs(lookahead_rate) * np.abs(lookahead_vel)
+
+    curv_direction = np.sign(np.sum(lookahead_rate))
+    if curv_direction == 0:
+      curv_direction = np.sign(orientation_rate[0]) if orientation_rate[0] != 0 else 1.0
+
+    max_pred_lat_acc = float(np.max(future_lat_acc))
+    max_curve = max_pred_lat_acc / (v_ego**2) if max_pred_lat_acc > 0.0 else 1e-6
+
     adjusted_target_lat_a = TARGET_LAT_A * self.autoCurveSpeedAggressiveness
+    turnSpeed = max(abs(adjusted_target_lat_a / max_curve)**0.5 * 3.6, 5.0)
+    turnSpeed = min(turnSpeed, 250.0)
 
-    # Get the target velocity for the maximum curve
-    #turnSpeed = max(abs(adjusted_target_lat_a / max_curve)**0.5  * 3.6, self.autoCurveSpeedLowerLimit)
-    turnSpeed = max(abs(adjusted_target_lat_a / max_curve)**0.5  * 3.6, 5)
-    turnSpeed = min(turnSpeed, 250)
+    # 급격한 속도 차단을 줄이고, 예측형 반응이 더 부드럽게 동작하도록 마지막 속도를 유지
+    if np.isfinite(self.vturn_last_speed):
+      if turnSpeed < self.vturn_last_speed:
+        turnSpeed = min(turnSpeed, self.vturn_last_speed * 0.92)
+      else:
+        turnSpeed = max(turnSpeed, self.vturn_last_speed * 1.05)
+    self.vturn_last_speed = float(turnSpeed)
+
     return turnSpeed * curv_direction
 
   def carrot_navi_thread(self):
