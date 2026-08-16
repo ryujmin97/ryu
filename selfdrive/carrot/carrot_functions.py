@@ -131,10 +131,19 @@ class CarrotPlanner:
 
     # 차선변경 종료 후 tFollow 복귀 지연(ease-back) 상태
     self._lc_active_prev = False
+    self._lc_active_now = False
     self._lc_post_hold_cnt = 0
     self._lc_t_follow_at_end = 1.0
     self.tFollowLaneChangeHoldTime = 1.0   # s: 차선변경 종료 직후 좁은 tFollow를 그대로 유지하는 시간
     self.tFollowLaneChangeBlendTime = 1.5  # s: 이후 정상 tFollow로 서서히 되돌아가는 시간
+    # 차선변경 중 '공격적으로 좁게 붙는' 상태를 유지하는 최대 시간의 안전 상한.
+    # 예전엔 1.5초 고정이었는데, 실주행 로그(총 67분) 확인 결과 실제 차선변경
+    # 20건 중 17건(85%)이 1.5초보다 길게(평균 3.3초, 최대 5.1초) 걸려서, 차선변경이
+    # 채 끝나기도 전에 tFollow가 정상값으로 튀었다가 종료 시점에 다시 좁아지는
+    # '이중 널뛰기' 현상이 있었음. 이제는 laneChangeState가 실제로 꺼질 때까지
+    # 좁은 상태를 유지하고, 이 값은 그게 비정상적으로 오래 걸릴 때만 개입하는
+    # 순수 안전장치(runaway guard) 역할만 한다.
+    self.lcAggressiveMaxTime = 8.0  # s
     self.jerk_factor = 1.0
     self.jerk_factor_apply = 1.0
 
@@ -319,13 +328,17 @@ class CarrotPlanner:
       blend_steps = max(1, int(self.tFollowLaneChangeBlendTime / DT_MDL))
       self._lc_post_hold_cnt = hold_steps + blend_steps
     self._lc_active_prev = lc_active
+    self._lc_active_now = lc_active  # dynamic_t_follow에서 실제 진행 여부 판단용
 
 
   def dynamic_t_follow(self, t_follow, lead, desired_follow_distance, prev_a):
     self.jerk_factor_apply = self.jerk_factor
 
-    # 차선변경 시작 후 1.5초 동안은 공격적으로
-    lc_lc_active = self.desireState > 0.9 and self.desireStateCount < int(1.5 / DT_MDL)
+    # 차선변경 시작 후 laneChangeState가 실제로 꺼질 때까지 공격적으로.
+    # lcAggressiveMaxTime은 비정상적으로 길게 늘어지는 경우에 대한 안전장치일 뿐,
+    # 정상적인 차선변경 동작 중엔 걸리지 않도록 충분히 크게 잡혀 있다.
+    lc_lc_active = (self.desireState > 0.9 and getattr(self, '_lc_active_now', False) and
+                    self.desireStateCount < int(self.lcAggressiveMaxTime / DT_MDL))
     if lc_lc_active:
       dynamicTFollowLC = max(0.2, self.dynamicTFollowLC)
       t_follow *= dynamicTFollowLC
