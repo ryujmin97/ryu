@@ -630,7 +630,17 @@ class RadarD:
 
       alive_tracks = {tid: trk for tid, trk in self.tracks.items() if trk.cnt > 2 }
       lead_one_raw, self.radar_detected = self.get_lead(sm['carState'], md, alive_tracks, 0, leads_v3[0], model_v_ego, low_speed_override=False)
-      self.radar_state.leadOne = self.lead_blend.update(lead_one_raw, DT_MDL)
+      if lead_one_raw.get('radar'):
+        # 빨간박스: SCC 레이더 락온 상태. 이미 안정적인 실측값이므로 블렌딩 지연 없이 그대로 사용.
+        # prev는 계속 갱신해둬서, 이후 파란박스(비전)로 전환되는 순간 블렌딩이 오래된 값부터
+        # 시작하지 않도록 함.
+        self.radar_state.leadOne = lead_one_raw
+        self.lead_blend.prev = dict(lead_one_raw)
+        self.lead_blend.miss_cnt = 0
+        self.lead_blend.danger_hold_cnt = 0
+      else:
+        # 파란박스: 비전만으로 추적 중. 트랙전환/미스 노이즈가 있으니 LeadBlend로 디바운싱.
+        self.radar_state.leadOne = self.lead_blend.update(lead_one_raw, DT_MDL)
       self.radar_state.leadTwo, _ = self.get_lead(sm['carState'], md, alive_tracks, 1, leads_v3[1], model_v_ego, low_speed_override=False)
 
       self.lane_line_available = md.laneLineProbs[1] > 0.5 and md.laneLineProbs[2] > 0.5
