@@ -97,6 +97,24 @@ def desired_follow_distance(v_ego, v_lead, comfort_brake, stop_distance, t_follo
     t_follow = get_T_FOLLOW()
   return get_safe_obstacle_distance(v_ego, t_follow, comfort_brake, stop_distance) - get_stopped_equivalence_factor(v_lead)
 
+# --- margin-based lead accel damping ---
+# Goal: when there's plenty of following-distance margin, ignore the lead's aLead
+# jitter (accel AND decel) and hold a steady speed instead of chasing every wiggle.
+# As the margin shrinks toward the safety-distance threshold, damping fades out so
+# the full raw aLead is used -- safety response is never delayed.
+# NOTE: only aLead is gated here. dRel/vRel (the actual measured kinematic state)
+# are left completely untouched, since damping those would corrupt the real
+# closing-distance estimate and could delay braking on a genuinely closing lead.
+MARGIN_ACCEL_GATE_FULL = 1.5  # dRel/desired_distance ratio at/above which aLead is fully damped (weight=0)
+MARGIN_ACCEL_GATE_NONE = 1.0  # dRel/desired_distance ratio at/below which aLead passes through unchanged (weight=1)
+
+
+def margin_accel_weight(dRel, desired_distance):
+  if desired_distance <= 1.0:
+    return 1.0
+  ratio = dRel / desired_distance
+  return float(np.clip((MARGIN_ACCEL_GATE_FULL - ratio) / (MARGIN_ACCEL_GATE_FULL - MARGIN_ACCEL_GATE_NONE), 0.0, 1.0))
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -333,6 +351,12 @@ class LongitudinalMpc:
       v_lead = lead.vLead
       a_lead = lead.aLeadK
       a_lead_tau = lead.aLeadTau
+
+      # margin-based accel damping: with enough following-distance margin, ignore
+      # lead accel/decel jitter and hold steady; response ramps back to full as
+      # margin shrinks toward the safety threshold. self.desired_distance is the
+      # previous cycle's value (one 0.05s-old sample) -- negligible staleness.
+      a_lead *= margin_accel_weight(x_lead, self.desired_distance)
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0
