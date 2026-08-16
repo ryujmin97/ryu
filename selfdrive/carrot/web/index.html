@@ -319,6 +319,17 @@
         <button id="logsTabScreenrecord" class="logs-subtab" role="tab" aria-selected="false" type="button">화면녹화</button>
       </div>
 
+      <div class="logs-gdrive-panel">
+        <div class="logs-gdrive-line">
+          <div id="logsGdriveStatus" class="muted logs-gdrive-status">Google Drive: 연결 안됨</div>
+          <button id="btnGdriveAuth" class="smallBtn btn--filled" type="button">연결</button>
+        </div>
+        <div class="logs-gdrive-form">
+          <input id="gdriveClientId" type="text" class="input-text" placeholder="Client ID" />
+          <input id="gdriveClientSecret" type="password" class="input-text" placeholder="Client Secret" />
+        </div>
+      </div>
+
       <div id="logsStatus" class="muted logs-status" hidden></div>
 
       <!-- 대시캠(주행 로그) 패널 -->
@@ -327,7 +338,8 @@
           <div class="muted" id="dashcamMeta">-</div>
           <div class="logs-toolbar__actions">
             <button id="btnDashcamSelectAll" class="smallBtn" type="button">전체 선택</button>
-            <button id="btnDashcamDownloadSelected" class="smallBtn btn--filled" type="button">선택 다운로드</button>
+            <button id="btnDashcamDownloadSelected" class="smallBtn" type="button">선택 다운로드</button>
+            <button id="btnDashcamUploadSelected" class="smallBtn btn--filled" type="button">Drive 전송</button>
           </div>
         </div>
         <div id="dashcamRoutes" class="dashcam-routes"></div>
@@ -340,7 +352,8 @@
           <div class="muted" id="screenrecordMeta">-</div>
           <div class="logs-toolbar__actions">
             <button id="btnScreenrecordSelectAll" class="smallBtn" type="button">전체 선택</button>
-            <button id="btnScreenrecordDownloadSelected" class="smallBtn btn--filled" type="button">선택 다운로드</button>
+            <button id="btnScreenrecordDownloadSelected" class="smallBtn" type="button">선택 다운로드</button>
+            <button id="btnScreenrecordUploadSelected" class="smallBtn btn--filled" type="button">Drive 전송</button>
           </div>
         </div>
         <div id="screenrecordList" class="screenrecord-list"></div>
@@ -383,21 +396,6 @@
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4zM9 8.5l5 3.5-5 3.5v-7z"/></svg>
       </span>
       <span>Logs</span>
-    </button>
-    <button id="btnFleet" class="nav-btn">
-      <span class="nav-icon">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z"/></svg>
-      </span>
-      <span>Fleet</span>
-    </button>
-    <button id="btnLang" class="nav-btn langToggle">
-      <span class="nav-icon">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
-      </span>
-      <span id="langLabel" class="lang-label">
-        <span class="lang-label__main">lang</span>
-        <span class="lang-label__sub">(ko)</span>
-      </span>
     </button>
   </nav>
 

@@ -22,6 +22,30 @@
   color: var(--md-on-primary);
 }
 
+.logs-gdrive-panel {
+  margin-bottom: var(--sp-md);
+  padding: var(--sp-md);
+  background: var(--md-surface-cont);
+  border-radius: var(--r-lg);
+}
+
+.logs-gdrive-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-sm);
+  margin-bottom: var(--sp-sm);
+}
+
+.logs-gdrive-status {
+  font-weight: 600;
+}
+
+.logs-gdrive-form {
+  display: grid;
+  gap: var(--sp-sm);
+}
+
 .logs-status {
   margin-bottom: var(--sp-sm);
 }

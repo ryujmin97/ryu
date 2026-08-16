@@ -417,9 +417,6 @@ const btnHome = document.getElementById("btnHome");
 const btnSetting = document.getElementById("btnSetting");
 const btnTerminal = document.getElementById("btnTerminal");
 const btnLogs = document.getElementById("btnLogs");
-const btnFleet = document.getElementById("btnFleet");
-const btnLang = document.getElementById("btnLang");
-const langLabel = document.getElementById("langLabel");
 const btnTools = document.getElementById("btnTools");
 const btnRecordToggle = document.getElementById("btnRecordToggle");
 const btnSettingSearch = document.getElementById("btnSettingSearch");
@@ -512,19 +509,6 @@ btnRecordToggle.onclick = () => toggleRecord();
 btnSetting.onclick = () => showPage("setting", true, getSwipeTransition(CURRENT_PAGE, "setting"));
 btnTerminal.onclick = () => showPage("terminal", true, getSwipeTransition(CURRENT_PAGE, "terminal"));
 btnLogs.onclick = () => showPage("logs", true, getSwipeTransition(CURRENT_PAGE, "logs"));
-
-btnFleet.onclick = async () => {
-  const ip = location.hostname;
-  const url = `http://${ip}:8082/`;
-  const ok = await appConfirm(
-    `${getUIText("fleet_open_confirm", "Open Fleet?")}\n\n${url}`,
-    { title: UI_STRINGS[LANG].fleet || "Fleet" },
-  );
-  if (!ok) return;
-  window.open(url, "_blank", "noopener");
-};
-
-btnLang.onclick = () => toggleLang();
 
 btnChangeCar.onclick = () => showPage("car", true);
 btnBackCar.onclick = () => history.back();
@@ -943,7 +927,6 @@ function renderUIText() {
   setNavText("btnTools", s.tools);
   setNavText("btnTerminal", s.terminal);
   setNavText("btnLogs", s.logs);
-  setNavText("btnFleet", s.fleet);
 
   // Home
   setText("chipServerLabel", s.server_state);
@@ -1020,6 +1003,7 @@ function setText(id, txt) {
 }
 
 function updateLangLabel() {
+  const langLabel = document.getElementById("langLabel");
   if (!langLabel) return;
 
   const main = langLabel.querySelector(".lang-label__main");
@@ -1029,11 +1013,6 @@ function updateLangLabel() {
     sub.textContent = `(${LANG})`;
   } else {
     langLabel.textContent = `lang (${LANG})`;
-  }
-
-  if (btnLang) {
-    btnLang.setAttribute("aria-label", `lang (${LANG})`);
-    btnLang.title = `lang (${LANG})`;
   }
 }
 

@@ -37,6 +37,12 @@ def make_app() -> web.Application:
   app.router.add_get("/api/screenrecord/videos", routes_logs.api_screenrecord_videos)
   app.router.add_get("/api/screenrecord/download/{file_id}", routes_logs.api_screenrecord_download)
 
+  # gdrive upload / auth
+  app.router.add_get("/api/gdrive/status", routes_logs.api_gdrive_status)
+  app.router.add_post("/api/gdrive/device", routes_logs.api_gdrive_device)
+  app.router.add_post("/api/gdrive/token", routes_logs.api_gdrive_token)
+  app.router.add_post("/api/gdrive/upload", routes_logs.api_gdrive_upload)
+
   # ws
   app.router.add_get("/ws/state", routes_ws.ws_state)
   app.router.add_get("/ws/carstate", routes_ws.ws_carstate)

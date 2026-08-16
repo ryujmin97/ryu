@@ -16,6 +16,14 @@ const logsState = {
   screenrecordSelected: new Set(), // file id 들
   bound: false,
   activeTab: "dashcam",
+  gdrive: {
+    connected: false,
+    status: "disconnected",
+    userCode: "",
+    verificationUri: "",
+    lastError: "",
+    polling: null,
+  },
 };
 
 function logsSegmentIndex(segment) {
@@ -291,6 +299,110 @@ async function screenrecordDownloadSelected() {
 /* 초기화 / 이벤트 바인딩                                                   */
 /* ---------------------------------------------------------------------- */
 
+async function loadGdriveStatus() {
+  try {
+    const r = await fetch("/api/gdrive/status");
+    const j = await r.json();
+    if (!j || !j.ok) return;
+    logsState.gdrive.connected = !!j.connected;
+    logsState.gdrive.status = j.status || "disconnected";
+    logsState.gdrive.userCode = j.user_code || "";
+    logsState.gdrive.verificationUri = j.verification_uri || "";
+    logsState.gdrive.lastError = j.last_error || "";
+    const el = document.getElementById("logsGdriveStatus");
+    if (el) {
+      el.textContent = logsState.gdrive.connected ? "Google Drive: 연결됨" : (logsState.gdrive.status === "pending" ? `Google Drive: 인증 대기 (${logsState.gdrive.userCode || "code"})` : "Google Drive: 연결 안됨");
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function triggerGdriveAuth() {
+  const clientId = document.getElementById("gdriveClientId")?.value?.trim();
+  const clientSecret = document.getElementById("gdriveClientSecret")?.value?.trim();
+  if (!clientId) {
+    showAppToast("Client ID를 입력하세요", { tone: "error" });
+    return;
+  }
+  try {
+    const r = await fetch("/api/gdrive/device", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+    });
+    const j = await r.json();
+    if (!j || !j.ok) {
+      showAppToast(j?.error || "인증 요청 실패", { tone: "error" });
+      return;
+    }
+    logsState.gdrive.userCode = j.user_code || "";
+    logsState.gdrive.verificationUri = j.verification_uri || "";
+    logsState.gdrive.status = "pending";
+    const el = document.getElementById("logsGdriveStatus");
+    if (el) {
+      el.textContent = `Google Drive 인증 대기: ${logsState.gdrive.userCode}`;
+    }
+    if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
+    logsState.gdrive.polling = setInterval(async () => {
+      const sr = await fetch("/api/gdrive/status");
+      const sj = await sr.json();
+      if (sj && sj.connected) {
+        logsState.gdrive.connected = true;
+        logsState.gdrive.status = "connected";
+        showAppToast("Google Drive 연결 완료", { tone: "success" });
+        if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
+        logsState.gdrive.polling = null;
+      } else if (sj && sj.status === "error") {
+        logsState.gdrive.status = "error";
+        logsState.gdrive.lastError = sj.last_error || "error";
+        if (logsState.gdrive.polling) clearInterval(logsState.gdrive.polling);
+        logsState.gdrive.polling = null;
+      }
+      const s = document.getElementById("logsGdriveStatus");
+      if (s) {
+        s.textContent = logsState.gdrive.connected ? "Google Drive: 연결됨" : (logsState.gdrive.status === "pending" ? `Google Drive: 인증 대기 (${logsState.gdrive.userCode || "code"})` : "Google Drive: 연결 안됨");
+      }
+    }, 5000);
+    showAppToast("브라우저에서 인증 코드를 입력해 주세요", { tone: "success" });
+  } catch (e) {
+    showAppToast(e?.message || "인증 실패", { tone: "error" });
+  }
+}
+
+async function uploadSelectedFiles(kind) {
+  if (!logsState.gdrive.connected) {
+    showAppToast("Google Drive 연결이 필요합니다", { tone: "error" });
+    return;
+  }
+  const payloads = kind === "dashcam" ? Array.from(logsState.dashcamSelected) : Array.from(logsState.screenrecordSelected);
+  if (!payloads.length) {
+    showAppToast("업로드할 파일을 선택하세요", { tone: "error" });
+    return;
+  }
+
+  for (const item of payloads) {
+    const body = kind === "dashcam" ? { kind: "dashcam", segment: item } : { kind: "screenrecord", file_id: item };
+    logsSetStatus("Drive 업로드 중...");
+    try {
+      const r = await fetch("/api/gdrive/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!j || !j.ok) {
+        throw new Error(j?.error || "업로드 실패");
+      }
+      showAppToast(`${item} 업로드 완료`, { tone: "success" });
+    } catch (e) {
+      showAppToast(`${item} 업로드 실패: ${e?.message || e}`, { tone: "error" });
+      break;
+    }
+  }
+  logsSetStatus("");
+}
+
 function bindLogsEvents() {
   if (logsState.bound) return;
   logsState.bound = true;
@@ -306,11 +418,20 @@ function bindLogsEvents() {
   const btnDashcamDownloadSelected = document.getElementById("btnDashcamDownloadSelected");
   if (btnDashcamDownloadSelected) btnDashcamDownloadSelected.onclick = () => dashcamDownloadSelected();
 
+  const btnDashcamUploadSelected = document.getElementById("btnDashcamUploadSelected");
+  if (btnDashcamUploadSelected) btnDashcamUploadSelected.onclick = () => uploadSelectedFiles("dashcam");
+
   const btnScreenrecordSelectAll = document.getElementById("btnScreenrecordSelectAll");
   if (btnScreenrecordSelectAll) btnScreenrecordSelectAll.onclick = () => screenrecordSelectAll();
 
   const btnScreenrecordDownloadSelected = document.getElementById("btnScreenrecordDownloadSelected");
   if (btnScreenrecordDownloadSelected) btnScreenrecordDownloadSelected.onclick = () => screenrecordDownloadSelected();
+
+  const btnScreenrecordUploadSelected = document.getElementById("btnScreenrecordUploadSelected");
+  if (btnScreenrecordUploadSelected) btnScreenrecordUploadSelected.onclick = () => uploadSelectedFiles("screenrecord");
+
+  const btnGdriveAuth = document.getElementById("btnGdriveAuth");
+  if (btnGdriveAuth) btnGdriveAuth.onclick = triggerGdriveAuth;
 
   const dashcamRoutesHost = document.getElementById("dashcamRoutes");
   if (dashcamRoutesHost) {
@@ -342,5 +463,6 @@ function bindLogsEvents() {
 
 function initLogsPage() {
   bindLogsEvents();
+  loadGdriveStatus();
   logsSwitchTab(logsState.activeTab || "dashcam");
 }
