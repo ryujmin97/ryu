@@ -27,6 +27,17 @@ V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 RADAR_TO_CENTER = 2.7   # (deprecated) RADAR is ~ 2.7m ahead from center of car
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 
+# --- LeadBlend safety tuning (vision-only lead tracking) ---
+# EnableRadarTracks < 3 cars (no usable radar points) rely entirely on the vision
+# model for lead detection, so track switches and brief misses are common. This
+# layer debounces the noise WITHOUT ever delaying a genuinely dangerous change.
+LEAD_BLEND_TTC_DANGER    = 2.5   # s   : TTC below this => treat as dangerous, apply immediately
+LEAD_BLEND_DANGER_HOLD   = 0.3   # s   : once flagged dangerous, keep bypassing smoothing this long
+LEAD_BLEND_SAFE_DIST_TIME = 0.35 # s   : time constant to blend dRel/vRel toward a safe-direction switch
+LEAD_LOST_GRACE_TIME     = 0.6   # s   : hold last known lead through a brief vision miss (debounce)
+CUTOUT_DPATH_THRESH      = 2.0   # m   : |dPath| beyond this = lead has clearly left our path (cut-out)
+CUTOUT_VREL_GATE         = -0.5  # m/s : only treat a miss as a cut-out if lead wasn't strongly closing
+
 
 def laplacian_pdf(x: float, mu: float, b: float):
   diff = abs(x - mu) / max(b, 1e-4)
@@ -360,7 +371,7 @@ class VisionTrack:
     return {
       "dRel": self.dRel,
       "yRel": self.yRel,
-      #"dPath": self.dPath,
+      "dPath": self.dPath,  # needed by LeadBlend cut-out detection (was disabled)
       "vRel": self.vRel,
       "vLead": self.vLead,
       "vLeadK": self.vLeadK,    ## TODO: 아직 vLeadK는 엉망인듯...
@@ -447,6 +458,88 @@ class VisionTrack:
       #self.aLeadTau = min(self.aLeadTau * 0.9, aLeadTauValue)
       self.aLeadTau *= 0.9
 
+class LeadBlend:
+  """
+  Debounces leadOne track-switch/miss noise, but never at the cost of reaction
+  time on a genuinely dangerous change.
+
+  - Lost-lead debounce: a lead that disappears for < LEAD_LOST_GRACE_TIME is
+    held (extrapolated) instead of instantly reported as gone, so a single
+    missed vision frame doesn't cause a follow-distance jerk.
+  - Cut-out bypass: if the last known lead was clearly leaving our path
+    (|dPath| > CUTOUT_DPATH_THRESH) and wasn't strongly closing, that's a real
+    cut-out, not a vision blip -- skip the grace hold and report it gone now.
+  - Asymmetric blend: a track switch that makes things safer (opening
+    distance / slower closing) is smoothed in over LEAD_BLEND_SAFE_DIST_TIME.
+    A track switch that makes things worse (closing distance, worsening
+    relative speed, TTC < LEAD_BLEND_TTC_DANGER) is passed through immediately.
+  """
+  def __init__(self):
+    self.prev: dict | None = None
+    self.miss_cnt = 0
+    self.danger_hold_cnt = 0
+
+  @staticmethod
+  def _ttc(dRel: float, vRel: float) -> float:
+    if vRel >= -0.1:
+      return 1e3
+    return max(dRel, 0.0) / max(-vRel, 0.1)
+
+  def _is_dangerous(self, raw: dict) -> bool:
+    ttc = self._ttc(raw['dRel'], raw['vRel'])
+    closing = raw['vRel'] < -0.1
+    worsening = (self.prev is not None and self.prev.get('status') and
+                 raw['vRel'] < self.prev.get('vRel', 0.0) - 0.3)
+    return ttc < LEAD_BLEND_TTC_DANGER and (closing or worsening)
+
+  def _is_cutout(self) -> bool:
+    if self.prev is None or not self.prev.get('status'):
+      return False
+    dPath = abs(self.prev.get('dPath', 0.0))
+    vRel = self.prev.get('vRel', 0.0)
+    return dPath > CUTOUT_DPATH_THRESH and vRel > CUTOUT_VREL_GATE
+
+  def update(self, raw: dict, dt: float) -> dict:
+    if not raw.get('status'):
+      if self._is_cutout():
+        self.prev, self.miss_cnt, self.danger_hold_cnt = None, 0, 0
+        return raw  # clear cut-out: report lost immediately, skip grace hold
+
+      if self.prev is not None and self.prev.get('status'):
+        self.miss_cnt += 1
+        if self.miss_cnt * dt < LEAD_LOST_GRACE_TIME:
+          held = dict(self.prev)
+          held['dRel'] = max(0.0, held.get('dRel', 0.0) + held.get('vRel', 0.0) * dt)
+          self.prev = held
+          return held
+
+      self.prev, self.miss_cnt, self.danger_hold_cnt = None, 0, 0
+      return raw
+
+    self.miss_cnt = 0
+
+    if self.prev is None or not self.prev.get('status'):
+      self.prev = dict(raw)
+      return raw
+
+    dangerous = self._is_dangerous(raw)
+    if dangerous:
+      self.danger_hold_cnt = int(LEAD_BLEND_DANGER_HOLD / max(dt, 1e-3))
+
+    if dangerous or self.danger_hold_cnt > 0:
+      self.danger_hold_cnt = max(0, self.danger_hold_cnt - 1)
+      self.prev = dict(raw)
+      return raw
+
+    alpha = float(np.clip(dt / LEAD_BLEND_SAFE_DIST_TIME, 0.0, 1.0))
+    blended = dict(raw)
+    for k in ('dRel', 'vRel', 'vLead', 'aLead', 'aLeadK'):
+      if k in raw and k in self.prev:
+        blended[k] = self.prev[k] + (raw[k] - self.prev[k]) * alpha
+    self.prev = dict(blended)
+    return blended
+
+
 class RadarD:
   def __init__(self, delay: float = 0.0):
     self.current_time = 0.0
@@ -464,6 +557,7 @@ class RadarD:
     self.ready = False
 
     self.vision_tracks = [VisionTrack(DT_MDL), VisionTrack(DT_MDL)]
+    self.lead_blend = LeadBlend()
 
     self.params = Params()
     self.enable_radar_tracks = self.params.get_int("EnableRadarTracks")
@@ -535,7 +629,8 @@ class RadarD:
         self.vision_tracks[1].update(leads_v3[1], model_v_ego, self.v_ego, md)
 
       alive_tracks = {tid: trk for tid, trk in self.tracks.items() if trk.cnt > 2 }
-      self.radar_state.leadOne, self.radar_detected = self.get_lead(sm['carState'], md, alive_tracks, 0, leads_v3[0], model_v_ego, low_speed_override=False)
+      lead_one_raw, self.radar_detected = self.get_lead(sm['carState'], md, alive_tracks, 0, leads_v3[0], model_v_ego, low_speed_override=False)
+      self.radar_state.leadOne = self.lead_blend.update(lead_one_raw, DT_MDL)
       self.radar_state.leadTwo, _ = self.get_lead(sm['carState'], md, alive_tracks, 1, leads_v3[1], model_v_ego, low_speed_override=False)
 
       self.lane_line_available = md.laneLineProbs[1] > 0.5 and md.laneLineProbs[2] > 0.5

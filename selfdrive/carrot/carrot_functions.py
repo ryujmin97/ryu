@@ -128,6 +128,13 @@ class CarrotPlanner:
 
     self.desireState = 0.0
     self.desireStateCount = 0
+
+    # 차선변경 종료 후 tFollow 복귀 지연(ease-back) 상태
+    self._lc_active_prev = False
+    self._lc_post_hold_cnt = 0
+    self._lc_t_follow_at_end = 1.0
+    self.tFollowLaneChangeHoldTime = 1.0   # s: 차선변경 종료 직후 좁은 tFollow를 그대로 유지하는 시간
+    self.tFollowLaneChangeBlendTime = 1.5  # s: 이후 정상 tFollow로 서서히 되돌아가는 시간
     self.jerk_factor = 1.0
     self.jerk_factor_apply = 1.0
 
@@ -294,22 +301,30 @@ class CarrotPlanner:
     meta = sm['modelV2'].meta
     carState = sm['carState']
 
-    if meta.laneChangeState == LaneChangeState.laneChangeStarting:
+    lc_active = meta.laneChangeState == LaneChangeState.laneChangeStarting
+    if lc_active:
       self.desireState = meta.desireState[3] if carState.leftBlinker else meta.desireState[4]
       self.desireStateCount += 1
     else:
       self.desireState = 0.0
       self.desireStateCount = 0
 
+    # 차선변경이 막 끝난 순간을 감지해서 tFollow 복귀 지연(hold) 카운트다운 시작
+    if self._lc_active_prev and not lc_active:
+      self._lc_post_hold_cnt = int(self.tFollowLaneChangeHoldTime / DT_MDL)
+    self._lc_active_prev = lc_active
+
 
   def dynamic_t_follow(self, t_follow, lead, desired_follow_distance, prev_a):
     self.jerk_factor_apply = self.jerk_factor
 
     # 차선변경 시작 후 1.5초 동안은 공격적으로
-    if self.desireState > 0.9 and self.desireStateCount < int(1.5 / DT_MDL):
+    lc_lc_active = self.desireState > 0.9 and self.desireStateCount < int(1.5 / DT_MDL)
+    if lc_lc_active:
       dynamicTFollowLC = max(0.2, self.dynamicTFollowLC)
       t_follow *= dynamicTFollowLC
       self.jerk_factor_apply = self.jerk_factor * dynamicTFollowLC
+      self._lc_t_follow_at_end = float(t_follow)  # 종료 직후 되돌아갈 기준값으로 기억
 
     # 일반 lead follow: lead.jLead 기반 동적 조절
     elif lead.status and self.dynamicTFollow > 0.0:
@@ -322,6 +337,17 @@ class CarrotPlanner:
         self.jerk_factor_apply = self.jerk_factor * 0.5
 
       t_follow = np.clip(t_follow, 0.3, 2.0)
+
+    # 차선변경 종료 직후: 정상 tFollow로 즉시 점프하지 않고,
+    # hold 구간 -> ease-back 구간을 거쳐 서서히 복귀 (급격한 목표거리 변화 방지)
+    if not lc_lc_active and self._lc_post_hold_cnt > 0:
+      blend_total = max(1, int(self.tFollowLaneChangeBlendTime / DT_MDL))
+      if self._lc_post_hold_cnt > blend_total:
+        t_follow = self._lc_t_follow_at_end
+      else:
+        frac = 1.0 - (self._lc_post_hold_cnt / blend_total)
+        t_follow = self._lc_t_follow_at_end + (t_follow - self._lc_t_follow_at_end) * frac
+      self._lc_post_hold_cnt -= 1
 
     return self.apply_t_follow(t_follow, 0.0)
 
