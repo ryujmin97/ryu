@@ -318,8 +318,28 @@ function bindGdriveCopyButton() {
     const code = logsState.gdrive.userCode || "";
     if (!code) return;
     try {
-      await navigator.clipboard.writeText(code);
-      showAppToast("코드가 복사되었습니다", { tone: "success" });
+      // 최신 방식: navigator.clipboard
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(code);
+        showAppToast("코드가 복사되었습니다", { tone: "success" });
+        return;
+      }
+      
+      // 폴백: execCommand 방식
+      const textarea = document.createElement("textarea");
+      textarea.value = code;
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      const success = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      
+      if (success) {
+        showAppToast("코드가 복사되었습니다", { tone: "success" });
+      } else {
+        showAppToast("복사 실패: 지원되지 않는 환경", { tone: "error" });
+      }
     } catch (e) {
       showAppToast("복사 실패: " + (e?.message || ""), { tone: "error" });
     }
