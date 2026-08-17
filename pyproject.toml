@@ -67,6 +67,9 @@ dependencies = [
 
   # logreader
   "zstandard",
+
+  # carrot navi route curvature calc (carrot_man.py carrot_navi_route)
+  "shapely",
 ]
 
 [project.optional-dependencies]
