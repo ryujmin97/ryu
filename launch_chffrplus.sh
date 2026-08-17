@@ -80,19 +80,19 @@ function launch {
     echo "Flask already installed."
   else
     echo "Flask installing."
-    pip install flask
+    pip install flask --break-system-packages
   fi
   if python -c "import shapely" > /dev/null 2>&1; then
     echo "shapely already installed."
   else
     echo "shapely installing."
-    pip install shapely
+    pip install shapely --break-system-packages
   fi
   if python -c "import kaitaistruct" > /dev/null 2>&1; then
     echo "kaitaistruct already installed."
   else
     echo "kaitaistruct installing."
-    pip install kaitaistruct
+    pip install kaitaistruct --break-system-packages
   fi
 
   # events language init
