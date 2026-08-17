@@ -303,7 +303,13 @@ class CarrotPlanner:
     tf_safe = float(tf_adjusted * self.mySafeFactor)
     tf_final = self._clip_t_follow(tf_safe)
     self._tf_applied = float(tf_final)
-    return self.apply_t_follow(tf_final)
+    # NOTE: apply_t_follow()의 증가-완만화 레이트리미터는 사이클당 단 한 번만
+    # 호출되어야 한다 (long_mpc.update()의 최종 t_follow 확정 시점). 여기서
+    # 호출하고 dynamic_t_follow()에서 다시 호출하면 self.t_follow_last가
+    # 두 번 갱신되면서, 차선변경 중 dynamicTFollowLC로 줄어든 값이 다음 사이클의
+    # 레이트리미터 기준선이 되고 거기서 또 줄어드는 식으로 누적 붕괴(0에 수렴)
+    # 하는 버그가 있었다. raw target만 반환하고 rate-limit은 호출부에서 1회만.
+    return tf_final
 
 
   def _update_model_desire(self, sm):
@@ -368,7 +374,9 @@ class CarrotPlanner:
         t_follow = self._lc_t_follow_at_end + (t_follow - self._lc_t_follow_at_end) * frac
       self._lc_post_hold_cnt -= 1
 
-    return self.apply_t_follow(t_follow, 0.0)
+    # rate-limit(apply_t_follow)은 여기서 호출하지 않는다: 호출부(long_mpc.update())가
+    # 이 사이클의 최종 t_follow 값을 확정한 뒤 단 한 번만 적용한다.
+    return float(t_follow)
 
 
   def apply_t_follow(self, t_follow, adjust_t_follow=0.0):

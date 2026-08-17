@@ -508,6 +508,12 @@ class LongitudinalMpc:
       desired_distance = desired_follow_distance(v_ego, lead_v_0, comfort_brake, stop_distance, t_follow)
       t_follow = carrot.dynamic_t_follow(t_follow, radarstate.leadOne, desired_distance, self.prev_a)
 
+    # t_follow의 증가 방향 레이트리미터(apply_t_follow)는 이 사이클의 최종 t_follow 값에
+    # 대해 정확히 한 번만 적용한다. get_T_FOLLOW/dynamic_t_follow 내부에서 각자 호출하면
+    # 차선변경 등으로 값이 줄었을 때 그 줄어든 값이 다음 사이클 기준선이 되어 계속
+    # 누적으로 더 줄어드는(0으로 수렴하는) 버그가 생긴다.
+    t_follow = carrot.apply_t_follow(t_follow)
+
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
