@@ -116,6 +116,50 @@ def margin_accel_weight(dRel, desired_distance):
   return float(np.clip((MARGIN_ACCEL_GATE_FULL - ratio) / (MARGIN_ACCEL_GATE_FULL - MARGIN_ACCEL_GATE_NONE), 0.0, 1.0))
 
 
+# --- Lead-acquisition proactive deceleration ramp (2026-08-17 실주행 로그 대응) ---
+# 증상: 고속도로에서 앞차가 처음 인식될 때는 감속이 없다가, 인식 소스가
+# 바뀌거나(비전<->레이더) 관측치가 뒤늦게 보정되는 순간부터 갑자기 감속이
+# 시작되어 급감속처럼 느껴짐.
+#
+# 원인: leadOne이 막 나타난 시점의 dRel/vLead 추정치가 가장 부정확하다.
+# 이건 비전에만 해당하는 얘기가 아니다 -- Genesis DH 단일빔 SCC 레이더도
+# 근접구간/사각지대에서 순간적으로 락을 놓쳤다가 다시 잡을 때 낡은 값을
+# 들고 있는 경우가 있고, 반대로 레이더가 먼저 애매한 값으로 락온한 뒤
+# 비전이 더 정확한 근거리 값을 보여주는 경우도 있다. 어느 쪽이 먼저
+# 인식하든, "막 나타난 리드"의 첫 관측치는 신뢰도가 낮다는 점은 동일하다.
+#
+# 대응: leadOne이 새로 감지되어 LEAD_ACQ_CONFIRM_TIME 이상 연속으로(짧은
+# 순간유실은 LEAD_ACQ_LOSS_GRACE_TIME까지 허용) 유지되는 순간부터, "지금 내
+# 속도라면 유지해야 할 표준 차간거리"를 가상의 안전마진 하한선으로 두고,
+# 이 하한선을 LEAD_ACQ_RAMP_TIME에 걸쳐 서서히(step 없이) 적용한다.
+# - 비전이 먼저 인식하든 레이더가 먼저 인식하든 동일하게 적용 (source 무관,
+#   radarstate.leadOne.status만 본다).
+# - 1회성 노이즈 블립(아주 잠깐 나타났다 사라지는 오검출)은 CONFIRM_TIME을
+#   채우기 전에 사라지므로 램프 자체가 시작되지 않는다.
+# - 최초 인식 이후 "연속된 락온"이 아니라 소스 전환/순간유실로 인해 status가
+#   깜빡이는 경우, LOSS_GRACE_TIME 이내의 유실은 진행 중이던 램프를 리셋하지
+#   않고 그대로 이어간다 (다시 나타나면 누적된 진행률에서 계속). GRACE_TIME을
+#   넘겨 정말로 사라지면 그때 완전히 리셋된다.
+# - 원본 raw 관측치가 이 하한선보다 이미 더 타이트(위험)하면 그대로 raw가
+#   이긴다 (min 연산이므로 이 로직은 감속을 절대 완화시키지 않고, 오직
+#   "최소한 이만큼은 이미 감속을 시작해야 한다"는 바닥만 깔아준다).
+# - 램프가 끝나면(기본 5초) 하한선은 완전히 해제되고 이후로는 실측치가 그대로
+#   사용된다 -- 정말로 멀리 있는(위협적이지 않은) 리드를 영구히 좁은
+#   목표거리로 묶어두지 않기 위함.
+#
+# 튜닝 이력 (2026-08-17, 6개 구간 실주행 로그 22세그먼트 재검증):
+# RAMP_TIME=3.0s 상태로는 최초 인식 시점에 이미 접근속도(vRel)가 크게
+# 마이너스인 "급접근" 리드(예: vRel0 -8~-13m/s)에서 급감속이 ramp 완료
+# 이전(1.3~3.0s 부근)이나 ramp 종료 직후(~5s)에 터지는 사례가 다수
+# 관측됨 (route2a t=162s: aMin=-2.99@1.3s, route4b t=94.8s: aMin=-5.46@3.0s,
+# route4a t=211s: aMin=-2.57@5.0s). 개입 구간을 5.0s로 늘려 완만한 접근
+# 케이스의 부드러움은 유지하면서 급접근 케이스에 대한 커버리지를 넓힘.
+LEAD_ACQ_RAMP_TIME       = 5.0   # s   : 하한선을 0 -> 100% 로 서서히 적용하는 시간
+LEAD_ACQ_MIN_V_EGO       = 3.0   # m/s : 이 속도 미만에서는 적용하지 않음 (정체/크립 구간 노이즈 방지)
+LEAD_ACQ_CONFIRM_TIME    = 0.2   # s   : 이 시간 이상 연속 감지되어야 "진짜 인식"으로 보고 램프 시작 (1회성 블립 무시)
+LEAD_ACQ_LOSS_GRACE_TIME = 0.5   # s   : 짧은 순간유실은 이 시간까지 봐주고 진행 중인 램프를 그대로 유지
+
+
 def gen_long_model():
   model = AcadosModel()
   model.name = MODEL_NAME
@@ -266,6 +310,12 @@ class LongitudinalMpc:
     self.desired_distance = 0.0
     self.lead_danger_factor = LEAD_DANGER_FACTOR
 
+    # lead-acquisition proactive deceleration ramp state (see LEAD_ACQ_RAMP_TIME above)
+    self._lead_present_run_timer = 0.0   # 연속(짧은 유실 포함) 감지 지속시간 -> CONFIRM_TIME과 비교
+    self._lead_absent_timer = 0.0        # 미검출 지속시간 -> LOSS_GRACE_TIME과 비교, 넘으면 완전 리셋
+    self._lead_acq_ramp_started = False  # CONFIRM_TIME을 채워서 램프가 실제로 시작되었는지
+    self._lead_acq_timer = 0.0           # 램프 시작 이후 경과시간 -> frac 계산용
+
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -391,6 +441,33 @@ class LongitudinalMpc:
     t_follow = carrot.get_T_FOLLOW(personality, v_ego, a_ego)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
+    # lead-acquisition ramp bookkeeping: source (vision-first or radar-first)
+    # doesn't matter here -- only radarstate.leadOne.status is watched, so a
+    # radar-first lock ramps exactly the same way a vision-first one does.
+    lead_one_status_now = bool(radarstate.leadOne.status)
+    if lead_one_status_now:
+      self._lead_absent_timer = 0.0
+      self._lead_present_run_timer += self.dt
+      if not self._lead_acq_ramp_started:
+        # not yet confirmed as a real (non-blip) lead -- don't start ramping
+        # until it's been continuously present for LEAD_ACQ_CONFIRM_TIME.
+        if self._lead_present_run_timer >= LEAD_ACQ_CONFIRM_TIME:
+          self._lead_acq_ramp_started = True
+          self._lead_acq_timer = 0.0
+      else:
+        self._lead_acq_timer += self.dt
+    else:
+      self._lead_absent_timer += self.dt
+      if self._lead_absent_timer > LEAD_ACQ_LOSS_GRACE_TIME:
+        # genuinely gone (not just a brief source-switch/miss blip) -- reset
+        # everything so the next real lead starts a fresh ramp from zero.
+        self._lead_present_run_timer = 0.0
+        self._lead_acq_ramp_started = False
+        self._lead_acq_timer = 0.0
+      # else: within grace -- freeze state as-is, don't reset. If the lead
+      # reappears next cycle, an already-started ramp just keeps going from
+      # where it left off instead of restarting.
+
     if radarstate.leadOne.status:
       j_lead = radarstate.leadOne.jLead
       self.j_lead = j_lead * 0.1 + self.j_lead * 0.9
@@ -418,6 +495,22 @@ class LongitudinalMpc:
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
     
     self.desired_distance = desired_follow_distance(v_ego, lead_v_0, comfort_brake, stop_distance, t_follow)
+
+    # apply the lead-acquisition proactive floor (see LEAD_ACQ_RAMP_TIME) only
+    # in 'acc' mode, only once the acquisition has been confirmed (not a
+    # one-off blip), and only while the ramp window is still open.
+    if (mode == 'acc' and radarstate.leadOne.status and v_ego >= LEAD_ACQ_MIN_V_EGO
+        and self._lead_acq_ramp_started and self._lead_acq_timer <= LEAD_ACQ_RAMP_TIME):
+      frac = float(np.clip(self._lead_acq_timer / LEAD_ACQ_RAMP_TIME, 0.0, 1.0))
+      # virtual reference: an object exactly at the standard current-speed
+      # follow distance, assumed to move with ego (matching speed) across the
+      # horizon -- same construction as cruise_obstacle below, just anchored
+      # to v_ego instead of v_cruise.
+      virtual_v_traj = np.full(N + 1, v_ego)
+      virtual_obstacle = np.cumsum(T_DIFFS * virtual_v_traj) + get_safe_obstacle_distance(virtual_v_traj, t_follow, comfort_brake, stop_distance)
+      # ramp from "no effect" (frac=0, cap == raw) to "full floor" (frac=1, cap == virtual)
+      floor_cap = lead_0_obstacle + (virtual_obstacle - lead_0_obstacle) * frac
+      lead_0_obstacle = np.minimum(lead_0_obstacle, floor_cap)
 
     self.params[:,0] = ACCEL_MIN if not reset_state else a_ego
     # negative accel constraint causes problems because negative speed is not allowed
