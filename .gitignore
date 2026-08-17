@@ -112,3 +112,7 @@ todo_dev/
 # Claude Code
 .claude/
 CLAUDE.md
+
+# Local log analysis scripts (c:\dev\logs path hardcoded, local-only analysis tool)
+analyze_logs.py
+analysis_script.py
