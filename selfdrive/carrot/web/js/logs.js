@@ -43,66 +43,6 @@ function logsSetStatus(message, tone = "") {
   el.classList.toggle("is-error", tone === "error");
 }
 
-// ---------------------------------------------------------------------------
-// Drive 업로드 로그 — 완료 시 사라지는 토스트 대신, 페이지에 누적되는
-// 로그로 남긴다. localStorage에 저장해 페이지를 벗어났다 돌아와도 유지.
-// ---------------------------------------------------------------------------
-const GDRIVE_LOG_KEY = "carrotweb_gdrive_upload_log";
-const GDRIVE_LOG_MAX = 50;
-
-function loadGdriveUploadLog() {
-  try {
-    const raw = localStorage.getItem(GDRIVE_LOG_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? list : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function saveGdriveUploadLog(list) {
-  try {
-    localStorage.setItem(GDRIVE_LOG_KEY, JSON.stringify(list.slice(0, GDRIVE_LOG_MAX)));
-  } catch (e) {
-    // 저장 실패해도 화면 표시에는 지장 없으므로 무시
-  }
-}
-
-function renderGdriveUploadLog() {
-  const host = document.getElementById("logsGdriveLog");
-  const list = document.getElementById("logsGdriveLogList");
-  if (!host || !list) return;
-  const entries = loadGdriveUploadLog();
-  if (!entries.length) {
-    host.hidden = true;
-    list.innerHTML = "";
-    return;
-  }
-  host.hidden = false;
-  list.innerHTML = entries.map((entry) => {
-    const tone = entry.status === "success" ? "is-success" : "is-error";
-    const time = entry.ts ? new Date(entry.ts).toLocaleString() : "";
-    const linkHtml = entry.link ? ` <a href="${escapeHtml(entry.link)}" target="_blank" rel="noopener">열기</a>` : "";
-    return `<div class="logs-gdrive-log-entry ${tone}">` +
-      `<span class="logs-gdrive-log-time">${escapeHtml(time)}</span>` +
-      `<span class="logs-gdrive-log-name">${escapeHtml(entry.name || "")}</span>` +
-      `<span class="logs-gdrive-log-msg">${escapeHtml(entry.message || "")}</span>` +
-      `${linkHtml}</div>`;
-  }).join("");
-}
-
-function addGdriveUploadLog(entry) {
-  const list = loadGdriveUploadLog();
-  list.unshift({ ...entry, ts: Date.now() });
-  saveGdriveUploadLog(list);
-  renderGdriveUploadLog();
-}
-
-function clearGdriveUploadLog() {
-  saveGdriveUploadLog([]);
-  renderGdriveUploadLog();
-}
-
 function logsSwitchTab(tab) {
   logsState.activeTab = tab;
   const tabDashcam = document.getElementById("logsTabDashcam");
@@ -618,22 +558,21 @@ async function uploadSelectedFiles(kind) {
       if (!j || !j.ok) throw new Error(j?.error || "업로드 실패");
       const snap = await pollGdriveUploadJob(j.job_id, { index, total });
       if (snap.status !== "done") throw new Error(snap.error || "업로드 실패");
-      addGdriveUploadLog({
-        name: unit.label,
-        status: "success",
-        message: `업로드 완료(${index}/${total})`,
-        link: snap.result && snap.result.link,
-      });
+      // 완료 시 누적 로그를 새로 쌓는 대신, 진행률이 표시되던 같은 자리에
+      // "100%(업로드 완료)"만 표시한다. 다음 항목으로 넘어가기 전 잠깐
+      // 보여준 뒤 이어서 진행한다.
+      logsSetStatus(`업로드 완료(${index}/${total}) 100%`);
+      if (index < total) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
     } catch (e) {
-      addGdriveUploadLog({
-        name: unit.label,
-        status: "error",
-        message: `업로드 실패(${index}/${total}): ${e?.message || e}`,
-      });
-      break;
+      logsSetStatus(`업로드 실패(${index}/${total}): ${e?.message || e}`, "error");
+      return;
     }
   }
-  logsSetStatus("");
+  // 전체 완료 후에는 자동으로 지우지 않고 그대로 표시해 둔다.
+  // 다음 업로드를 시작할 때(uploadSelectedFiles 진입 시 logsSetStatus 호출)
+  // 자연스럽게 새 상태로 덮어써진다.
 }
 
 function bindLogsEvents() {
@@ -665,9 +604,6 @@ function bindLogsEvents() {
 
   const btnGdriveAuth = document.getElementById("btnGdriveAuth");
   if (btnGdriveAuth) btnGdriveAuth.onclick = triggerGdriveAuth;
-
-  const btnGdriveLogClear = document.getElementById("btnGdriveLogClear");
-  if (btnGdriveLogClear) btnGdriveLogClear.onclick = clearGdriveUploadLog;
 
   const dashcamRoutesHost = document.getElementById("dashcamRoutes");
   if (dashcamRoutesHost) {
@@ -706,6 +642,5 @@ function bindLogsEvents() {
 function initLogsPage() {
   bindLogsEvents();
   loadGdriveStatus();
-  renderGdriveUploadLog();
   logsSwitchTab(logsState.activeTab || "dashcam");
 }
