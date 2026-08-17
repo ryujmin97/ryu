@@ -70,6 +70,11 @@ dependencies = [
 
   # carrot navi route curvature calc (carrot_man.py carrot_navi_route)
   "shapely",
+
+  # frogpilot fleet_manager.py (Flask web UI)
+  "flask",
+  # ubloxd generated parsers (system/ubloxd/generated/*.py) + carrot/server/core.py
+  "kaitaistruct",
 ]
 
 [project.optional-dependencies]
