@@ -333,6 +333,13 @@ function getGdriveStatusHTML() {
   }
 }
 
+function updateGdriveFormVisibility() {
+  // 연결에 성공하면 Client ID/Secret 입력 폼은 더 이상 필요 없으므로 숨긴다.
+  // 연결이 끊기거나(미연결/대기/오류) 다시 필요해지면 보여준다.
+  const form = document.getElementById("logsGdriveForm");
+  if (form) form.hidden = !!logsState.gdrive.connected;
+}
+
 function bindGdriveCopyButton() {
   const btn = document.getElementById("btnCopyGdriveCode");
   if (!btn) return;
@@ -383,6 +390,7 @@ async function loadGdriveStatus() {
       el.innerHTML = getGdriveStatusHTML();
       bindGdriveCopyButton();
     }
+    updateGdriveFormVisibility();
     // 페이지를 새로고침했는데 서버가 여전히 "인증 대기" 상태를 들고 있으면
     // (예: 폰에서 코드는 입력했지만 아직 브라우저를 안 닫음) 폴링을
     // 재개한다. device_code/client_id는 서버(GDRIVE_STATE)에 남아있는
@@ -441,6 +449,7 @@ function startGdriveTokenPolling() {
       s.innerHTML = getGdriveStatusHTML();
       bindGdriveCopyButton();
     }
+    updateGdriveFormVisibility();
   }, 5000);
 }
 
@@ -473,6 +482,7 @@ async function triggerGdriveAuth() {
       el.innerHTML = getGdriveStatusHTML();
       bindGdriveCopyButton();
     }
+    updateGdriveFormVisibility();
     startGdriveTokenPolling();
     showAppToast("브라우저에서 인증 코드를 입력해 주세요", { tone: "success" });
   } catch (e) {

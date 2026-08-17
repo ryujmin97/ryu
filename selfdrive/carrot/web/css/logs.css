@@ -46,6 +46,10 @@
   gap: var(--sp-sm);
 }
 
+.logs-gdrive-form[hidden] {
+  display: none;
+}
+
 .logs-status {
   margin-bottom: var(--sp-sm);
 }
