@@ -154,10 +154,30 @@ def margin_accel_weight(dRel, desired_distance):
 # 관측됨 (route2a t=162s: aMin=-2.99@1.3s, route4b t=94.8s: aMin=-5.46@3.0s,
 # route4a t=211s: aMin=-2.57@5.0s). 개입 구간을 5.0s로 늘려 완만한 접근
 # 케이스의 부드러움은 유지하면서 급접근 케이스에 대한 커버리지를 넓힘.
-LEAD_ACQ_RAMP_TIME       = 5.0   # s   : 하한선을 0 -> 100% 로 서서히 적용하는 시간
+LEAD_ACQ_RAMP_TIME       = 5.0   # s   : 하한선을 0 -> 100% 로 서서히 적용하는 시간 (경과시간 기준 기본 램프)
 LEAD_ACQ_MIN_V_EGO       = 3.0   # m/s : 이 속도 미만에서는 적용하지 않음 (정체/크립 구간 노이즈 방지)
 LEAD_ACQ_CONFIRM_TIME    = 0.2   # s   : 이 시간 이상 연속 감지되어야 "진짜 인식"으로 보고 램프 시작 (1회성 블립 무시)
 LEAD_ACQ_LOSS_GRACE_TIME = 0.5   # s   : 짧은 순간유실은 이 시간까지 봐주고 진행 중인 램프를 그대로 유지
+
+# 튜닝 이력 (2026-08-17 #2, TTC 기반 가변 강도 추가):
+# 경과시간 기준 램프(위 RAMP_TIME)만으로는 최초 인식 시점의 vRel 자체가
+# 낙관적으로 저평가된 케이스(비전 단독)에서, 진짜 접근속도가 램프 도중/직후에
+# 뒤늦게 드러나는 경우를 완전히 못 잡는다 (예: route2a t=162s는 1.3초 만에
+# aMin 발생, 5초 램프라도 그 시점엔 26%만 걸린 상태).
+#
+# 그래서 "인식 시점의 TTC를 한 번만 스냅샷"하는 대신, 매 프레임 현재
+# dRel/vRel로 TTC를 다시 계산해서 "지금 이 순간 진짜 위험한가"를 실시간으로
+# 반영한다. radard.py의 LeadBlend가 TTC<2.5s에서 즉시 반응하는 것과 동일한
+# 임계값을 사용해 두 로직의 위험 판단 기준을 통일한다.
+# - TTC >= LEAD_ACQ_TTC_CAUTION(6s): 위험 요소 없음, 기존 경과시간 램프만 적용
+# - TTC <= LEAD_ACQ_TTC_DANGER(2.5s): 경과시간 램프 진행 상황과 무관하게 즉시
+#   최대 강도(frac=1.0)로 개입 -- 진짜 접근속도가 막 드러난 순간이라도 그
+#   프레임부터 바로 반응
+# - 그 사이는 선형 보간
+# - frac = max(경과시간 기준 frac, TTC 기준 frac) 이므로 이 로직 역시 절대
+#   감속을 완화시키지 않고, 위험 신호가 잡히면 강도를 끌어올리기만 한다.
+LEAD_ACQ_TTC_DANGER      = 2.5   # s   : 이하이면 즉시 frac=1.0 (radard.py LeadBlend danger_hold와 동일 임계값)
+LEAD_ACQ_TTC_CAUTION     = 6.0   # s   : 이상이면 TTC 기반 개입 없음 (경과시간 램프만 작동)
 
 
 def gen_long_model():
@@ -496,21 +516,44 @@ class LongitudinalMpc:
     
     self.desired_distance = desired_follow_distance(v_ego, lead_v_0, comfort_brake, stop_distance, t_follow)
 
-    # apply the lead-acquisition proactive floor (see LEAD_ACQ_RAMP_TIME) only
-    # in 'acc' mode, only once the acquisition has been confirmed (not a
-    # one-off blip), and only while the ramp window is still open.
-    if (mode == 'acc' and radarstate.leadOne.status and v_ego >= LEAD_ACQ_MIN_V_EGO
-        and self._lead_acq_ramp_started and self._lead_acq_timer <= LEAD_ACQ_RAMP_TIME):
-      frac = float(np.clip(self._lead_acq_timer / LEAD_ACQ_RAMP_TIME, 0.0, 1.0))
-      # virtual reference: an object exactly at the standard current-speed
-      # follow distance, assumed to move with ego (matching speed) across the
-      # horizon -- same construction as cruise_obstacle below, just anchored
-      # to v_ego instead of v_cruise.
-      virtual_v_traj = np.full(N + 1, v_ego)
-      virtual_obstacle = np.cumsum(T_DIFFS * virtual_v_traj) + get_safe_obstacle_distance(virtual_v_traj, t_follow, comfort_brake, stop_distance)
-      # ramp from "no effect" (frac=0, cap == raw) to "full floor" (frac=1, cap == virtual)
-      floor_cap = lead_0_obstacle + (virtual_obstacle - lead_0_obstacle) * frac
-      lead_0_obstacle = np.minimum(lead_0_obstacle, floor_cap)
+    # apply the lead-acquisition proactive floor (see LEAD_ACQ_RAMP_TIME /
+    # LEAD_ACQ_TTC_DANGER) only in 'acc' mode, only once the acquisition has
+    # been confirmed (not a one-off blip).
+    if mode == 'acc' and radarstate.leadOne.status and v_ego >= LEAD_ACQ_MIN_V_EGO and self._lead_acq_ramp_started:
+      # elapsed-time component: 0 -> 1 over LEAD_ACQ_RAMP_TIME, then fully
+      # released (0) once the window closes -- a genuinely far/safe lead
+      # isn't held to the tighter virtual distance forever.
+      if self._lead_acq_timer <= LEAD_ACQ_RAMP_TIME:
+        frac_time = float(np.clip(self._lead_acq_timer / LEAD_ACQ_RAMP_TIME, 0.0, 1.0))
+      else:
+        frac_time = 0.0
+
+      # live TTC component: recomputed every frame from the *current*
+      # dRel/vRel (not a one-time snapshot at acquisition), so if the true
+      # closing rate only reveals itself mid-ramp -- exactly the vision
+      # under-estimation failure mode this whole feature exists for -- the
+      # response snaps up immediately instead of waiting for frac_time to
+      # catch up. Same TTC<2.5s danger threshold as LeadBlend in radard.py.
+      lead_v_rel = radarstate.leadOne.vRel
+      if lead_v_rel < -0.1:
+        ttc_now = radarstate.leadOne.dRel / max(-lead_v_rel, 0.1)
+      else:
+        ttc_now = 999.0  # not closing (or moving away) -- no urgency
+      frac_ttc = float(np.clip((LEAD_ACQ_TTC_CAUTION - ttc_now) / (LEAD_ACQ_TTC_CAUTION - LEAD_ACQ_TTC_DANGER), 0.0, 1.0))
+
+      # take the stronger of the two -- this stays a pure floor and never
+      # softens braking versus either component alone.
+      frac = max(frac_time, frac_ttc)
+      if frac > 0.0:
+        # virtual reference: an object exactly at the standard current-speed
+        # follow distance, assumed to move with ego (matching speed) across the
+        # horizon -- same construction as cruise_obstacle below, just anchored
+        # to v_ego instead of v_cruise.
+        virtual_v_traj = np.full(N + 1, v_ego)
+        virtual_obstacle = np.cumsum(T_DIFFS * virtual_v_traj) + get_safe_obstacle_distance(virtual_v_traj, t_follow, comfort_brake, stop_distance)
+        # ramp from "no effect" (frac=0, cap == raw) to "full floor" (frac=1, cap == virtual)
+        floor_cap = lead_0_obstacle + (virtual_obstacle - lead_0_obstacle) * frac
+        lead_0_obstacle = np.minimum(lead_0_obstacle, floor_cap)
 
     self.params[:,0] = ACCEL_MIN if not reset_state else a_ego
     # negative accel constraint causes problems because negative speed is not allowed
