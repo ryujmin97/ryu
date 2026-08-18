@@ -26,6 +26,7 @@ const logsState = {
     clientId: "",
     clientSecret: "",
     deviceCode: "",
+    uploading: false, // Drive 업로드 배치가 진행 중인지 (중복 실행 방지용)
   },
 };
 
@@ -528,9 +529,32 @@ function groupSelectedDashcamByRoute() {
   return groups;
 }
 
+function setGdriveUploadButtonsDisabled(disabled) {
+  // 대시캠 탭/화면녹화 탭 버튼 둘 다 같은 #logsStatus 한 줄을 공유해서
+  // 상태 텍스트를 표시한다. 한쪽 업로드가 진행 중일 때 다른 쪽(혹은 같은
+  // 버튼 연타)으로 또 uploadSelectedFiles()가 시작되면 두 개의 독립된
+  // 루프가 같은 상태 줄을 번갈아 덮어써서 진행률이 "번갈아 뜨는" 것처럼
+  // 보이고, 하나가 끝나도 다른 하나가 백그라운드에서 계속 남아있는
+  // 상태가 된다. 업로드 중에는 두 버튼 모두 비활성화해 중복 실행 자체를
+  // 막는다.
+  const ids = ["btnDashcamUploadSelected", "btnScreenrecordUploadSelected"];
+  for (const id of ids) {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = disabled;
+  }
+}
+
 async function uploadSelectedFiles(kind) {
   if (!logsState.gdrive.connected) {
     showAppToast("Google Drive 연결이 필요합니다", { tone: "error" });
+    return;
+  }
+  if (logsState.gdrive.uploading) {
+    // 재진입 방지: 이전 업로드가 아직 끝나지 않은 상태(네트워크 지연으로
+    // "연결 확인 중..."에 멈춰 보이는 경우 포함)에서 버튼을 다시 누르면
+    // 여기서 막는다. 버튼도 disabled 처리하지만, 혹시 이벤트가 중복
+    // 바인딩되거나 disabled 반영 전에 눌린 경우를 대비한 이중 안전장치.
+    showAppToast("이미 Drive 업로드가 진행 중입니다. 완료 후 다시 시도하세요.", { tone: "error" });
     return;
   }
 
@@ -555,34 +579,41 @@ async function uploadSelectedFiles(kind) {
 
   const total = units.length;
   let index = 0;
-  for (const unit of units) {
-    index += 1;
-    logsSetStatus(`업로드 중(${index}/${total})... 준비 중...`);
-    try {
-      const r = await fetch("/api/gdrive/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(unit.body),
-      });
-      const j = await r.json();
-      if (!j || !j.ok) throw new Error(j?.error || "업로드 실패");
-      const snap = await pollGdriveUploadJob(j.job_id, { index, total });
-      if (snap.status !== "done") throw new Error(snap.error || "업로드 실패");
-      // 완료 시 누적 로그를 새로 쌓는 대신, 진행률이 표시되던 같은 자리에
-      // "100%(업로드 완료)"만 표시한다. 다음 항목으로 넘어가기 전 잠깐
-      // 보여준 뒤 이어서 진행한다.
-      logsSetStatus(`업로드 완료(${index}/${total}) 100%`);
-      if (index < total) {
-        await new Promise((resolve) => setTimeout(resolve, 600));
+  logsState.gdrive.uploading = true;
+  setGdriveUploadButtonsDisabled(true);
+  try {
+    for (const unit of units) {
+      index += 1;
+      logsSetStatus(`업로드 중(${index}/${total})... 준비 중...`);
+      try {
+        const r = await fetch("/api/gdrive/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(unit.body),
+        });
+        const j = await r.json();
+        if (!j || !j.ok) throw new Error(j?.error || "업로드 실패");
+        const snap = await pollGdriveUploadJob(j.job_id, { index, total });
+        if (snap.status !== "done") throw new Error(snap.error || "업로드 실패");
+        // 완료 시 누적 로그를 새로 쌓는 대신, 진행률이 표시되던 같은 자리에
+        // "100%(업로드 완료)"만 표시한다. 다음 항목으로 넘어가기 전 잠깐
+        // 보여준 뒤 이어서 진행한다.
+        logsSetStatus(`업로드 완료(${index}/${total}) 100%`);
+        if (index < total) {
+          await new Promise((resolve) => setTimeout(resolve, 600));
+        }
+      } catch (e) {
+        logsSetStatus(`업로드 실패(${index}/${total}): ${e?.message || e}`, "error");
+        return;
       }
-    } catch (e) {
-      logsSetStatus(`업로드 실패(${index}/${total}): ${e?.message || e}`, "error");
-      return;
     }
+    // 전체 완료 후에는 자동으로 지우지 않고 그대로 표시해 둔다.
+    // 다음 업로드를 시작할 때(uploadSelectedFiles 진입 시 logsSetStatus 호출)
+    // 자연스럽게 새 상태로 덮어써진다.
+  } finally {
+    logsState.gdrive.uploading = false;
+    setGdriveUploadButtonsDisabled(false);
   }
-  // 전체 완료 후에는 자동으로 지우지 않고 그대로 표시해 둔다.
-  // 다음 업로드를 시작할 때(uploadSelectedFiles 진입 시 logsSetStatus 호출)
-  // 자연스럽게 새 상태로 덮어써진다.
 }
 
 function bindLogsEvents() {

@@ -264,6 +264,19 @@ async def api_gdrive_disconnect(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 # access token 관리 (refresh_token으로 자동 재발급)
 # ---------------------------------------------------------------------------
+# 토큰 갱신 / 폴더 조회·생성 / resumable 세션 여는 요청은 전부 작은
+# JSON 왕복이라 정상이면 1~2초 안에 끝난다. 그런데 이 요청들이 업로드
+# 청크(PUT)와 같은 aiohttp.ClientSession을 공유하다 보니 세션 레벨
+# 타임아웃(sock_read=300s)을 그대로 물려받아, 네트워크가 끊기거나
+# 응답이 안 오는 상황에서 프론트에 "Google Drive 연결 확인 중..." 0%로
+# 최대 5분간 아무 피드백 없이 멈춰 있는 것처럼 보이는 원인이 됐다
+# (실제 관찰: 이 구간에서 멈춘 채 한참 후 "Timeout on reading data from
+# socket"으로 실패). 핸드셰이크 단계만 짧은 타임아웃으로 분리해 빨리
+# 실패하고 에러 메시지를 보여주도록 한다. 실제 파일 청크 전송은 느린
+# 회선에서도 끝까지 가야 하므로 계속 _UPLOAD_TIMEOUT(관대한 값)을 쓴다.
+_HANDSHAKE_TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=10, sock_read=15)
+
+
 async def _get_access_token(session: aiohttp.ClientSession) -> str:
   now = time.monotonic()
   if _access_token_cache["token"] and now < _access_token_cache["expires_at"]:
@@ -279,7 +292,7 @@ async def _get_access_token(session: aiohttp.ClientSession) -> str:
     "client_secret": client_secret,
     "refresh_token": refresh_token,
     "grant_type": "refresh_token",
-  }) as resp:
+  }, timeout=_HANDSHAKE_TIMEOUT) as resp:
     data = await _read_json_safe(resp)
     if resp.status != 200:
       raise RuntimeError(data.get("error_description", str(data)))
@@ -293,7 +306,9 @@ async def _get_access_token(session: aiohttp.ClientSession) -> str:
 async def _ensure_folder(session: aiohttp.ClientSession, token: str) -> str:
   headers = {"Authorization": f"Bearer {token}"}
   query = f"name='{DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-  async with session.get(DRIVE_FILES_URL, headers=headers, params={"q": query, "fields": "files(id,name)"}) as resp:
+  async with session.get(
+    DRIVE_FILES_URL, headers=headers, params={"q": query, "fields": "files(id,name)"}, timeout=_HANDSHAKE_TIMEOUT,
+  ) as resp:
     data = await _read_json_safe(resp)
   files = data.get("files") or []
   if files:
@@ -303,6 +318,7 @@ async def _ensure_folder(session: aiohttp.ClientSession, token: str) -> str:
     DRIVE_FILES_URL,
     headers={**headers, "Content-Type": "application/json"},
     json={"name": DRIVE_FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"},
+    timeout=_HANDSHAKE_TIMEOUT,
   ) as resp:
     data = await _read_json_safe(resp)
     if resp.status not in (200, 201):
@@ -452,6 +468,7 @@ async def upload_file_resumable(file_path: str, filename: str, job: dict[str, An
           "X-Upload-Content-Length": str(size),
         },
         json=metadata,
+        timeout=_HANDSHAKE_TIMEOUT,
       ) as resp:
         if resp.status not in (200, 201):
           data = await _read_json_safe(resp)
