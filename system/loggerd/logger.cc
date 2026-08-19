@@ -161,9 +161,12 @@ static void log_sentinel(LoggerState *log, SentinelType type, int exit_signal = 
   log->write(msg.toBytes(), true);
 }
 
-// 라우트당 최대 세그먼트 개수. 이 개수를 채우면(41번째 세그먼트부터)
+// 라우트당 최대 세그먼트 개수. 이 개수를 채우면(21번째 세그먼트부터)
 // 새 라우트를 만들어 이어서 기록한다.
-constexpr int MAX_SEGMENTS_PER_ROUTE = 40;
+// (2026-08-20: carrotweb 로그탭에서 라우트 하나가 너무 길어지는 것을
+// 방지하기 위해 40 -> 20으로 축소. 세그먼트 1개는 1분이므로 라우트당
+// 최대 길이가 약 40분 -> 20분으로 줄어든다.)
+constexpr int MAX_SEGMENTS_PER_ROUTE = 20;
 
 LoggerState::LoggerState(const std::string &log_root) {
   log_root_dir = log_root;

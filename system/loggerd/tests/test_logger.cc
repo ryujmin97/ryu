@@ -62,8 +62,10 @@ TEST_CASE("logger") {
   const std::string log_root = "/tmp/test_logger";
   system(("rm " + log_root + " -rf").c_str());
 
-  // MAX_SEGMENTS_PER_ROUTE(40)를 넘기면 새 라우트로 넘어가므로, 100개
-  // 세그먼트를 계속 next()하면 라우트가 여러 개(40+40+20) 생긴다.
+  // MAX_SEGMENTS_PER_ROUTE(20)를 넘기면 새 라우트로 넘어가므로, 100개
+  // 세그먼트를 계속 next()하면 라우트가 여러 개(20+20+20+20+20) 생긴다.
+  // (아래 로직은 실제 라우트 경계를 동적으로 추적하므로 상수 값이 바뀌어도
+  // 그대로 통과한다 -- 이 숫자는 설명용 주석일 뿐 하드코딩된 검증이 아님.)
   std::vector<std::string> route_names;
   std::vector<int> route_segment_counts;
   {
