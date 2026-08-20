@@ -22,6 +22,39 @@
   color: var(--md-on-primary);
 }
 
+.logs-refresh-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  border: none;
+  background: var(--md-surface-cont);
+  color: var(--md-on-surface-var);
+  cursor: pointer;
+}
+
+.logs-refresh-btn:active {
+  transform: scale(0.92);
+}
+
+.logs-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.logs-refresh-btn.is-loading .logs-refresh-icon {
+  animation: logsRefreshSpin 0.8s linear infinite;
+}
+
+@keyframes logsRefreshSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .logs-gdrive-panel {
   margin-bottom: var(--sp-md);
   padding: var(--sp-md);

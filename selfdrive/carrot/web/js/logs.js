@@ -44,6 +44,31 @@ function logsSetStatus(message, tone = "") {
   el.classList.toggle("is-error", tone === "error");
 }
 
+/* ---------------------------------------------------------------------- */
+/* 새로고침 (git pull 등으로 파일이 추가돼도 자동 갱신이 안 되는 문제 대응) */
+/* ---------------------------------------------------------------------- */
+
+async function logsRefreshCurrent() {
+  const btn = document.getElementById("btnLogsRefresh");
+  if (btn) {
+    if (btn.classList.contains("is-loading")) return; // 연타 중복 요청 방지
+    btn.classList.add("is-loading");
+    btn.disabled = true;
+  }
+  try {
+    if (logsState.activeTab === "dashcam") {
+      await loadDashcamRoutes();
+    } else {
+      await loadScreenrecordVideos();
+    }
+  } finally {
+    if (btn) {
+      btn.classList.remove("is-loading");
+      btn.disabled = false;
+    }
+  }
+}
+
 function logsSwitchTab(tab) {
   logsState.activeTab = tab;
   const tabDashcam = document.getElementById("logsTabDashcam");
@@ -624,6 +649,9 @@ function bindLogsEvents() {
   const tabScreenrecord = document.getElementById("logsTabScreenrecord");
   if (tabDashcam) tabDashcam.onclick = () => logsSwitchTab("dashcam");
   if (tabScreenrecord) tabScreenrecord.onclick = () => logsSwitchTab("screenrecord");
+
+  const btnLogsRefresh = document.getElementById("btnLogsRefresh");
+  if (btnLogsRefresh) btnLogsRefresh.onclick = () => logsRefreshCurrent();
 
   const btnDashcamSelectAll = document.getElementById("btnDashcamSelectAll");
   if (btnDashcamSelectAll) btnDashcamSelectAll.onclick = () => dashcamSelectAll();
