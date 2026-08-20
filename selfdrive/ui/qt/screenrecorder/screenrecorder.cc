@@ -184,8 +184,20 @@ void ScreenRecoder::stop_locked(bool auto_rollover) {
   // 사용자가 정지 버튼을 누른 게 아니므로 clip을 만들지 않는다 —
   // 그렇지 않으면 화면녹화를 계속 켜둔 채 장시간 주행 시 20분마다
   // clip이 무한히 쌓이게 된다.
+  // extract_trailing_clip() 내부의 QProcess::startDetached("ffmpeg", ...)는
+  // posix_spawn/vfork 기반이라 exec()가 완료될 때까지 "호출한 스레드"를
+  // 블로킹한다. stop_locked()는 정지 버튼 클릭 시 UI(Qt) 메인 스레드에서
+  // 동기 실행되므로, 여기서 직접 호출하면 ffmpeg 바이너리 exec가 느릴 때
+  // (특히 방금 큰 mp4를 다 쓴 직후 스토리지가 바쁜 상태) UI 메인 스레드가
+  // 수 초간 멈춰 manager의 ui watchdog(5s, watchdog_kick()이 UI 메인
+  // 스레드의 QTimer에서만 호출됨)를 넘겨 ui가 SIGKILL당하고 재시작되는
+  // 사고로 이어진다(실차 swaglog로 확인: "Watchdog timeout for ui
+  // (exitcode None) restarting" — SIGSEGV가 아니라 순수 응답지연).
+  // 별도 스레드로 완전히 분리해 UI 메인 스레드는 즉시 반환하도록 한다.
   if (!auto_rollover && !finished_path.empty()) {
-    extract_trailing_clip(finished_path);
+    std::thread([this, finished_path]() {
+      extract_trailing_clip(finished_path);
+    }).detach();
   }
 }
 
