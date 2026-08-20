@@ -154,7 +154,7 @@ void ScreenRecoder::start_locked() {
   update();
 }
 
-void ScreenRecoder::stop_locked() {
+void ScreenRecoder::stop_locked(bool auto_rollover) {
   if (!recording.load()) {
     if (encoding_thread.joinable()) {
       encoding_thread.join();
@@ -180,7 +180,11 @@ void ScreenRecoder::stop_locked() {
   // 메인 파일은 이미 finalize됐으므로, 정지 시점을 기준으로 마지막 1분을
   // 별도 clip으로 잘라낸다. 녹화 길이가 1분 미만이어도 (전체 길이만큼)
   // 항상 생성 — clip 파일을 목록에서 구분하기 쉽게 하기 위함.
-  if (!finished_path.empty()) {
+  // 단, 20분 자동 세그먼트 롤오버(auto_rollover=true)로 인한 정지는
+  // 사용자가 정지 버튼을 누른 게 아니므로 clip을 만들지 않는다 —
+  // 그렇지 않으면 화면녹화를 계속 켜둔 채 장시간 주행 시 20분마다
+  // clip이 무한히 쌓이게 된다.
+  if (!auto_rollover && !finished_path.empty()) {
     extract_trailing_clip(finished_path);
   }
 }
@@ -198,9 +202,23 @@ void ScreenRecoder::extract_trailing_clip(const std::string& source_path) {
 
   // 메인 녹화와 같은 폴더에 저장 -> carrotweb 로그탭 화면녹화 목록에
   // 자동으로 같이 뜸. 파일명은 타임스탬프 + "_clip" 접미사.
+  //
+  // 타임스탬프 해상도는 의도적으로 초 단위 유지(분 단위로 낮추면 버킷이
+  // 60배 커져 충돌 확률이 오히려 늘고, clip의 목적 자체가 "이벤트 발생
+  // 시각과 가장 가까운 세그먼트를 초 단위로 찾기"라 정밀도가 필요함).
+  // 대신 같은 초에 정지가 두 번 겹치는 드문 경우(토글 연타 등)에 앞
+  // clip을 -y로 소리 없이 덮어쓰지 않도록, 대상 경로가 이미 있으면
+  // "_clip_2", "_clip_3", ... 접미사를 붙인다. 정상 케이스(충돌 없음)는
+  // 지금까지와 동일하게 "_clip.mp4" 그대로 나간다.
   size_t last_slash = source_path.find_last_of('/');
   std::string dir = (last_slash == std::string::npos) ? "." : source_path.substr(0, last_slash);
   std::string clip_path = dir + "/" + std::string(ts) + "_clip.mp4";
+
+  struct stat st;
+  int suffix = 2;
+  while (stat(clip_path.c_str(), &st) == 0) {
+    clip_path = dir + "/" + std::string(ts) + "_clip_" + std::to_string(suffix++) + ".mp4";
+  }
 
   // stream copy(-c copy, 재인코딩 없음)라 빠르고 화질 손실 없음. -sseof를
   // -i보다 앞에 둬서(입력 시크) 가장 가까운 키프레임 기준으로 빠르게
@@ -277,7 +295,7 @@ void ScreenRecoder::update_screen() {
 
   if (need_restart) {
     std::lock_guard<std::mutex> lk(record_lock);
-    stop_locked();
+    stop_locked(/*auto_rollover=*/true);
     start_locked();
     return;
   }
