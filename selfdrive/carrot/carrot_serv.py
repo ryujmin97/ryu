@@ -189,6 +189,41 @@ class CarrotServ:
     self.gas_pressed_state = False
     self.source_last = "none"
 
+    # 2026-08-20 (devnotes FINDINGS.md "[NEEDS_VALIDATION] src/desiredSpeed
+    # 플리커 -- vturn<->road/model/route 전환에서 대규모 재현" 대응): "model"
+    # 후보(modelTurnSpeed)는 desire_helper._make_model_turn_speed()가 모델
+    # 예측 궤적의 미래 속도를 그대로 저역통과 필터링한 값이라, 실제 커브
+    # 곡률에 대한 판단이 없다 -- vturn/route는 이미 각자 "이 지점이 커브인지
+    # 직선인지"를 곡률/거리 기반으로 명시적으로 판단해서 무제한(250에
+    # 가까운 값)으로 되돌리는 반면, model 후보는 그 판단 없이 속도값만
+    # 넘어오므로 실제로는 이미 직선에 들어섰는데도 필터 지연 때문에 낮은
+    # 값을 잠깐 더 들고 있다가 vturn/route가 이미 250으로 복귀한 뒤에야
+    # 뒤늦게 따라 올라온다 -- 그 사이 min() 후보가 프레임마다 왕복하며
+    # src/desiredSpeed 플리커로 나타남 (커브 진입 구간뿐 아니라 "커브를
+    # 빠져나온 직후"에도 반복 발생, FINDINGS.md 실측 164건 중 A->B->A
+    # 49건, vturn<->model이 가장 우세한 쌍).
+    #
+    # 대응: model 후보를 min()에 넣기 전에, vturn이 이미 갖고 있는 "회전
+    # 종료" 판단 근거를 그대로 공유한다. vturn_speed()가 매 프레임 계산하는
+    # modelV2.action.desiredCurvature(차선 추종용 최종 곡률, lateral 제어기
+    # 입력값 그 자체)가 model_turn_straight_hold_sec 이상 연속으로
+    # model_turn_straight_thresh 미만이면 "지금은 직선"으로 보고 model
+    # 후보를 이번 프레임 min() 후보에서 제외한다(하한선이 아니라 완전
+    # 배제 -- vturn/route가 이미 없음(250)으로 응답 중인 상황과 동일하게
+    # 맞춤). 곡률이 다시 threshold를 넘는 즉시(counter 리셋) model 후보는
+    # 지연 없이 바로 복귀 -- 실제 커브 진입을 늦게 반영하는 부작용은 없음,
+    # "이미 끝난 커브를 model만 뒤늦게 붙잡고 있는" 경우만 제거하는
+    # 비대칭 설계.
+    # threshold(0.002)는 이미 devnotes 로그 분석 스크립트에서 "직선 대
+    # 회전" 구분 기준으로 쓰던 값과 동일하게 맞춤(FINDINGS.md
+    # "desiredCurvature도 19145 프레임 중 threshold(0.002) 초과 39건뿐").
+    # hold_sec(0.6)은 실측 플리커 클러스터 지속시간(0.4~2.8s) 대비 짧은
+    # 쪽으로 잡아, 진짜 S자 커브 사이 짧은 직선 구간까지 model을 과도하게
+    # 배제하지 않도록 함 -- 실차 검증 후 필요시 조정.
+    self.model_turn_straight_thresh = 0.002    # rad/m, 이 미만이면 "거의 직선" 프레임으로 취급
+    self.model_turn_straight_hold_sec = 0.6    # 이 시간 이상 연속 직선이어야 model 후보 배제
+    self.model_turn_straight_count = 0         # 연속 직선 프레임 카운터 (20Hz 루프 기준)
+
     self.debugText = ""
 
     # 默认语言，稍后在 update_params 中从 Params 读取覆盖，
@@ -985,8 +1020,20 @@ class CarrotServ:
       speed_n_sources.append((route_speed, "route"))
       #speed_n_sources.append((self.calculate_current_speed(dist, speed * self.mapTurnSpeedFactor, 0, 1.2), "route"))
 
+    # vturn이 이미 판단한 "지금 직선인가"를 model 후보에도 공유 (위
+    # __init__ 주석 참고). desiredCurvature는 lateral 제어기가 실제로
+    # 쓰는 최종 곡률이므로 vturn 내부의 point_curve와 별개로 매 프레임
+    # 바로 얻을 수 있다.
+    desired_curvature_now = abs(sm['modelV2'].action.desiredCurvature)
+    if desired_curvature_now < self.model_turn_straight_thresh:
+      self.model_turn_straight_count += 1
+    else:
+      self.model_turn_straight_count = 0
+    # carrot_man 브로드캐스트 루프 주기와 동일 (Ratekeeper(20) -> 0.05s/frame)
+    model_turn_confirmed_straight = (self.model_turn_straight_count * 0.05) >= self.model_turn_straight_hold_sec
+
     model_turn_speed = max(sm['modelV2'].meta.modelTurnSpeed, self.autoCurveSpeedLowerLimit)
-    if model_turn_speed < 200 and abs(vturn_speed) < 120:
+    if model_turn_speed < 200 and abs(vturn_speed) < 120 and not model_turn_confirmed_straight:
       speed_n_sources.append((model_turn_speed, "model"))
 
     desired_speed, source = min(speed_n_sources, key=lambda x: x[0])
