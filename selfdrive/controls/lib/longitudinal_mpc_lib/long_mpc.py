@@ -527,10 +527,24 @@ class LongitudinalMpc:
       # where it left off instead of restarting.
 
     # vision-only closing-rate cross-check bookkeeping (see
-    # VISION_CLOSING_RATE_* above). Only tracked while radar hasn't locked on
-    # yet -- once radar confirms, its own vRel is already accurate and this
-    # cross-check is no longer needed (also avoids the dRel jump at the
-    # vision->radar handoff itself being misread as a closing-rate spike).
+    # VISION_CLOSING_RATE_* above). Only accumulated while radar hasn't
+    # locked on yet -- once radar confirms, its own vRel is already accurate
+    # and this cross-check is no longer needed (also avoids the dRel jump at
+    # the vision->radar handoff itself being misread as a closing-rate spike),
+    # so that case resets immediately (no grace).
+    #
+    # A brief leadStatus=False blip (model missing a frame, not a real loss)
+    # must NOT reset this -- same LEAD_ACQ_LOSS_GRACE_TIME grace as the ramp
+    # bookkeeping above, and for the same reason: real drive logs show
+    # leadStatus flickering False for 0.15~0.4s multiple times inside what is
+    # otherwise one continuous vision-only track (route2 260820 seg5 t~1647,
+    # route1 seg9 t~1078 -- see FINDINGS.md 22차). Before this fix, this block
+    # zeroed self._vision_dRel_rate on every such blip regardless of the grace
+    # timer above, so the low-pass filter kept restarting from 0 and never
+    # got the full continuous-tracking duration to converge -- silently
+    # undermining the ramp bookkeeping's own "freeze state within grace"
+    # intent (lines above). This was NOT caught by the 17차 validation
+    # because those 6 events happened to have unbroken leadStatus runs.
     if lead_one_status_now and not radarstate.leadOne.radar:
       dRel_now = float(radarstate.leadOne.dRel)
       if self._vision_dRel_prev is not None:
@@ -538,9 +552,22 @@ class LongitudinalMpc:
         alpha = float(np.clip(self.dt / VISION_CLOSING_RATE_TAU, 0.0, 1.0))
         self._vision_dRel_rate = self._vision_dRel_rate * (1. - alpha) + raw_rate * alpha
       self._vision_dRel_prev = dRel_now
-    else:
+    elif lead_one_status_now and radarstate.leadOne.radar:
+      # radar just confirmed -- reset immediately, no grace (see comment above).
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
+    elif self._lead_absent_timer > LEAD_ACQ_LOSS_GRACE_TIME:
+      # lead genuinely gone (grace exceeded) -- reset for a fresh start next time.
+      self._vision_dRel_prev = None
+      self._vision_dRel_rate = 0.0
+    # else: brief status blip within grace -- freeze dRel_prev/rate as-is.
+    # If the lead reappears next cycle with radar still unlocked, the rate
+    # estimate resumes accumulating instead of restarting from zero. Note
+    # dRel_prev is left stale across the blip (not extrapolated forward like
+    # LeadBlend does for the lost-lead case in radard.py) -- when tracking
+    # resumes, one raw_rate sample will be computed across the gap duration
+    # instead of one DT_MDL step, which the low-pass filter absorbs the same
+    # way it absorbs any other single noisy sample.
 
     if radarstate.leadOne.status:
       j_lead = radarstate.leadOne.jLead
