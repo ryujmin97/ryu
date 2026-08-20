@@ -179,6 +179,38 @@ LEAD_ACQ_LOSS_GRACE_TIME = 0.5   # s   : 짧은 순간유실은 이 시간까지
 LEAD_ACQ_TTC_DANGER      = 2.5   # s   : 이하이면 즉시 frac=1.0 (radard.py LeadBlend danger_hold와 동일 임계값)
 LEAD_ACQ_TTC_CAUTION     = 6.0   # s   : 이상이면 TTC 기반 개입 없음 (경과시간 램프만 작동)
 
+# --- Vision-only closing-rate cross-check (2026-08-20 실주행 대응) ---
+# 증상: 고속도로에서 먼 거리의 서행/정지 차량을 비전이 먼저 인식(파란박스,
+# modelProb 0.5대의 약한 확신)한 뒤로도 한참(수 초~10초 가까이) 감속이
+# 시작되지 않다가, SCC 레이더가 락온(빨간박스)하는 순간부터 갑자기 감속이
+# 시작됨.
+#
+# 원인: radard.py VisionTrack.update()는 modelProb < 0.97인 동안(즉 먼
+# 거리에서 거의 항상) leadOne.vRel을 모델이 예측한 순간 속도차이
+# (lead_msg.v[0] - model_v_ego)에서 그대로 가져온다. 이 값은 원거리·저확신
+# 구간에서 실제 접근속도보다 낙관적으로(0에 가깝게) 추정되는 경향이 있다
+# (VISION_RADAR_CROSSOVER.md 참고, highway 크로스오버 사례 중 갭 7~8초 동안
+# 90m 이상 좁혀진 경우 다수 확인). 위 LEAD_ACQ_TTC_* 로직은 이미 매 프레임
+# TTC를 재계산하지만, 그 TTC 자체가 이 낙관적인 vRel로 계산되므로 실제
+# 위험이 가려진 채로는 절대 임계값을 넘지 못해 개입하지 않는다 -- 레이더가
+# 락온해 정확한 vRel로 교체되는 그 프레임에야 비로소 TTC가 뚝 떨어지면서
+# 뒤늦게 급하게 반응하는 것처럼 느껴짐.
+#
+# 대응: radarstate.leadOne.vRel과는 별개로, leadOne.dRel 자체(위치 측정치는
+# 비전도 비교적 정확함)를 프레임 간 미분해서 독립적인 접근속도 추정치를
+# 저역통과 필터로 누적한다. 레이더가 아직 락온하지 않은 상태(leadOne.radar
+# == False)에서만 갱신/사용하며, 최소 VISION_CLOSING_RATE_MIN_TIME 이상
+# 연속 추적된 뒤부터만 신뢰해 초기 몇 프레임의 미분 노이즈를 걸러낸다.
+# 이렇게 얻은 TTC는 기존 vRel 기반 TTC와 min()으로 합쳐 "둘 중 더 위험한
+# 쪽"을 frac_ttc 계산에 사용한다 -- 기존 로직과 동일하게 순수 바닥(floor)
+# 역할만 하며 감속을 완화시키는 방향으로는 절대 작동하지 않는다.
+VISION_CLOSING_RATE_TAU      = 1.0   # s   : dRel 미분값 저역통과 필터 시정수 (짧을수록 반응 빠르지만 노이즈에 민감)
+VISION_CLOSING_RATE_MIN_TIME = 0.5   # s   : 이 시간 이상 연속 추적(비전 단독) 후에만 dRel 미분 TTC를 신뢰
+                                      # (모델 주기 DT_MDL=0.05s 기준 10프레임 -- 저역통과 필터가 원값 대비
+                                      # 약 39% 정도 수렴한 시점. 1.0s(20프레임, ~63% 수렴)보다 반응은
+                                      # 빠르지만 초기 수렴폭이 작으므로 danger 판정이 다소 보수적으로
+                                      # 나올 수 있음 -- 실측으로 추가 단축 여지 판단 필요)
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -336,6 +368,10 @@ class LongitudinalMpc:
     self._lead_acq_ramp_started = False  # CONFIRM_TIME을 채워서 램프가 실제로 시작되었는지
     self._lead_acq_timer = 0.0           # 램프 시작 이후 경과시간 -> frac 계산용
 
+    # vision-only closing-rate cross-check state (see VISION_CLOSING_RATE_* below)
+    self._vision_dRel_prev = None        # 직전 프레임 dRel (레이더 미확인 상태에서만 갱신)
+    self._vision_dRel_rate = 0.0         # 저역통과 필터링된 dRel 변화율(m/s), 음수=접근중
+
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -484,9 +520,27 @@ class LongitudinalMpc:
         self._lead_present_run_timer = 0.0
         self._lead_acq_ramp_started = False
         self._lead_acq_timer = 0.0
+        self._vision_dRel_prev = None
+        self._vision_dRel_rate = 0.0
       # else: within grace -- freeze state as-is, don't reset. If the lead
       # reappears next cycle, an already-started ramp just keeps going from
       # where it left off instead of restarting.
+
+    # vision-only closing-rate cross-check bookkeeping (see
+    # VISION_CLOSING_RATE_* above). Only tracked while radar hasn't locked on
+    # yet -- once radar confirms, its own vRel is already accurate and this
+    # cross-check is no longer needed (also avoids the dRel jump at the
+    # vision->radar handoff itself being misread as a closing-rate spike).
+    if lead_one_status_now and not radarstate.leadOne.radar:
+      dRel_now = float(radarstate.leadOne.dRel)
+      if self._vision_dRel_prev is not None:
+        raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
+        alpha = float(np.clip(self.dt / VISION_CLOSING_RATE_TAU, 0.0, 1.0))
+        self._vision_dRel_rate = self._vision_dRel_rate * (1. - alpha) + raw_rate * alpha
+      self._vision_dRel_prev = dRel_now
+    else:
+      self._vision_dRel_prev = None
+      self._vision_dRel_rate = 0.0
 
     if radarstate.leadOne.status:
       j_lead = radarstate.leadOne.jLead
@@ -545,6 +599,18 @@ class LongitudinalMpc:
         ttc_now = radarstate.leadOne.dRel / max(-lead_v_rel, 0.1)
       else:
         ttc_now = 999.0  # not closing (or moving away) -- no urgency
+
+      # vision-only closing-rate cross-check: the model-predicted vRel above
+      # can under-report true closing speed for a distant, low-confidence
+      # vision lead (see VISION_CLOSING_RATE_* comment). If we've tracked it
+      # continuously long enough to trust the dRel-derivative, take whichever
+      # of the two says it's more dangerous -- this never relaxes braking,
+      # only tightens it when the raw vRel is hiding real risk.
+      if (not radarstate.leadOne.radar) and self._lead_acq_timer >= VISION_CLOSING_RATE_MIN_TIME:
+        if self._vision_dRel_rate < -0.1:
+          ttc_dRel = radarstate.leadOne.dRel / max(-self._vision_dRel_rate, 0.1)
+          ttc_now = min(ttc_now, ttc_dRel)
+
       frac_ttc = float(np.clip((LEAD_ACQ_TTC_CAUTION - ttc_now) / (LEAD_ACQ_TTC_CAUTION - LEAD_ACQ_TTC_DANGER), 0.0, 1.0))
 
       # take the stronger of the two -- this stays a pure floor and never
