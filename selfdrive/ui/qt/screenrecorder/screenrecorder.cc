@@ -7,6 +7,9 @@
 #include <sys/time.h>
 #include <atomic>
 #include <mutex>
+#include <string>
+
+#include <QProcess>
 
 #include "libyuv.h"
 #include "common/clutil.h"
@@ -167,7 +170,52 @@ void ScreenRecoder::stop_locked() {
   }
 
   image_queue.clear();
+
+  std::string finished_path;
+  if (encoder) {
+    finished_path = encoder->get_last_video_path();
+  }
   closeEncoder();
+
+  // 메인 파일은 이미 finalize됐으므로, 정지 시점을 기준으로 마지막 1분을
+  // 별도 clip으로 잘라낸다. 녹화 길이가 1분 미만이어도 (전체 길이만큼)
+  // 항상 생성 — clip 파일을 목록에서 구분하기 쉽게 하기 위함.
+  if (!finished_path.empty()) {
+    extract_trailing_clip(finished_path);
+  }
+}
+
+void ScreenRecoder::extract_trailing_clip(const std::string& source_path) {
+  time_t t = time(NULL);
+  struct tm tm_buf;
+  localtime_r(&t, &tm_buf);
+
+  // 요청 포맷: YYMMDD_HHMMSS (예: 2026-08-20 13:23:03 -> 260820_132303)
+  char ts[16];
+  snprintf(ts, sizeof(ts), "%02d%02d%02d_%02d%02d%02d",
+    (tm_buf.tm_year + 1900) % 100, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+    tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+
+  // 메인 녹화와 같은 폴더에 저장 -> carrotweb 로그탭 화면녹화 목록에
+  // 자동으로 같이 뜸. 파일명은 타임스탬프 + "_clip" 접미사.
+  size_t last_slash = source_path.find_last_of('/');
+  std::string dir = (last_slash == std::string::npos) ? "." : source_path.substr(0, last_slash);
+  std::string clip_path = dir + "/" + std::string(ts) + "_clip.mp4";
+
+  // stream copy(-c copy, 재인코딩 없음)라 빠르고 화질 손실 없음. -sseof를
+  // -i보다 앞에 둬서(입력 시크) 가장 가까운 키프레임 기준으로 빠르게
+  // seek -> 실제 클립 길이는 약 60.0~60.8초(키프레임 간격만큼 오차).
+  // 원본 길이가 1분 미만이면 ffmpeg가 처음부터 잘라줌(요청대로 항상 생성).
+  QStringList args;
+  args << "-y"
+       << "-sseof" << "-60"
+       << "-i" << QString::fromStdString(source_path)
+       << "-c" << "copy"
+       << QString::fromStdString(clip_path);
+
+  // UI 스레드를 막지 않도록 완전히 분리된 프로세스로 실행(fire-and-forget).
+  // 실패해도(예: ffmpeg 없음, 원본 파일 문제) 메인 녹화 파일에는 영향 없음.
+  QProcess::startDetached("ffmpeg", args);
 }
 
 void ScreenRecoder::encoding_thread_func() {

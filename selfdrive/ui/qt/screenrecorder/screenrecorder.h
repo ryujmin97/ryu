@@ -50,6 +50,10 @@ private:
   void closeEncoder();
   void start_locked();
   void stop_locked();
+  // 정지 시점 기준 마지막 1분을 별도 clip mp4로 추출 (ffmpeg 백그라운드,
+  // 메인 파일은 이미 finalize된 상태라 non-blocking, 실패해도 메인 녹화에
+  // 영향 없음).
+  void extract_trailing_clip(const std::string& source_path);
 
   long long started = 0;
   int src_width = 0;

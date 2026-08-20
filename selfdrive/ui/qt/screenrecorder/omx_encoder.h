@@ -22,6 +22,10 @@ public:
   void encoder_open(const char* filename);
   void encoder_close();
 
+  // full path of the most recently opened (or just-closed) output file,
+  // used by ScreenRecoder to source the trailing-clip extraction.
+  const char* get_last_video_path() const { return vid_path; }
+
   // OMX callbacks
   static OMX_ERRORTYPE event_handler(OMX_HANDLETYPE component, OMX_PTR app_data, OMX_EVENTTYPE event,
                                      OMX_U32 data1, OMX_U32 data2, OMX_PTR event_data);
