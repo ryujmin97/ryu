@@ -56,7 +56,7 @@ private:
   // FINDINGS.md "[RISK_IDENTIFIED] screenrecord clip ... 20분 자동
   // 세그먼트 롤오버에서도 clip이 반복 생성됨" 대응).
   void stop_locked(bool auto_rollover = false);
-  // 정지 시점 기준 마지막 1분을 별도 clip mp4로 추출 (ffmpeg 백그라운드,
+  // 정지 시점 기준 마지막 20초를 별도 clip mp4로 추출 (ffmpeg 백그라운드,
   // 메인 파일은 이미 finalize된 상태라 non-blocking, 실패해도 메인 녹화에
   // 영향 없음). 같은 초에 두 번 호출되어 파일명이 충돌하면 stat()으로
   // 감지해 접미사를 붙임(앞 clip을 소리 없이 덮어쓰지 않도록).
