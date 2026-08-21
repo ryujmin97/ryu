@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import os
 import time
 import collections
@@ -256,8 +256,8 @@ VISION_CLOSING_RATE_MEDIAN_WINDOW = 3     # 프레임 : 최근 N개 클램프된
 # 작동하지 않는다.
 # 문턱값은 22차에서 설계된 대안 2번 그대로: CAUTION -5.5m/s(약 20km/h
 # 상대속도)부터 서서히 개입 시작, DANGER -10.0m/s부터 최대 강도.
-VISION_CLOSING_RATE_GATE_CAUTION = -5.5   # m/s : 이보다 느리게 닫히면(0에 가까우면) rate 기반 개입 없음
-VISION_CLOSING_RATE_GATE_DANGER  = -10.0  # m/s : 이보다 빠르게 닫히면 거리(TTC) 무관 최대 강도(frac_rate=1.0)
+VISION_CLOSING_RATE_GATE_CAUTION = -2.2   # m/s : 이 값 이상(접근 느림)이면 frac_rate=0
+VISION_CLOSING_RATE_GATE_DANGER  = -5.0   # m/s : 이 값 이하(급접근)면 frac_rate=1.0, 그 사이는 선형보간
 
 
 def gen_long_model():
