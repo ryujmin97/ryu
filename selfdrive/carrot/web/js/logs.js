@@ -14,7 +14,6 @@ const logsState = {
   screenrecordLoaded: false,
   screenrecordVideos: [],
   screenrecordSelected: new Set(), // file id 들
-  screenrecordClipOnly: false, // true면 "_clip.mp4"(정지 버튼 이벤트 클립)만 표시
   bound: false,
   activeTab: "dashcam",
   gdrive: {
@@ -271,7 +270,8 @@ async function loadScreenrecordVideos() {
     }
     logsState.screenrecordVideos = j.videos || [];
     logsState.screenrecordLoaded = true;
-    renderScreenrecordList(); // meta 텍스트도 여기서 같이 갱신(Clip만 필터 반영)
+    if (meta) meta.textContent = `${j.total ?? logsState.screenrecordVideos.length}개 파일`;
+    renderScreenrecordList();
   } catch (e) {
     if (meta) meta.textContent = "Failed: " + (e?.message || e);
   }
@@ -285,35 +285,33 @@ function isScreenrecordClip(video) {
   return /_clip(_\d+)?\.mp4$/i.test(name);
 }
 
-function getVisibleScreenrecordVideos() {
-  if (!logsState.screenrecordClipOnly) return logsState.screenrecordVideos;
-  return logsState.screenrecordVideos.filter(isScreenrecordClip);
-}
-
-function screenrecordToggleClipOnly() {
-  logsState.screenrecordClipOnly = !logsState.screenrecordClipOnly;
-  const btn = document.getElementById("btnScreenrecordClipOnly");
-  if (btn) btn.classList.toggle("is-active", logsState.screenrecordClipOnly);
+// "Clip만" 버튼: 목록은 그대로 전체 표시하되, clip 파일들의 체크박스만
+// 선택 상태로 만들어준다(필터링이 아니라 선택 보조 기능).
+// 이미 전부 선택돼 있으면 다시 눌렀을 때 해제(토글) — screenrecordSelectAll과
+// 동일한 토글 관례.
+function screenrecordSelectClipsOnly() {
+  const clips = logsState.screenrecordVideos.filter(isScreenrecordClip);
+  if (!clips.length) {
+    showAppToast("Clip 파일이 없습니다", { tone: "error" });
+    return;
+  }
+  const allClipsSelected = clips.every((v) => logsState.screenrecordSelected.has(v.id));
+  if (allClipsSelected) {
+    clips.forEach((v) => logsState.screenrecordSelected.delete(v.id));
+  } else {
+    clips.forEach((v) => logsState.screenrecordSelected.add(v.id));
+  }
   renderScreenrecordList();
 }
 
 function renderScreenrecordList() {
   const host = document.getElementById("screenrecordList");
   if (!host) return;
-  const visible = getVisibleScreenrecordVideos();
-  const meta = document.getElementById("screenrecordMeta");
-  if (meta) {
-    meta.textContent = logsState.screenrecordClipOnly
-      ? `${visible.length} / ${logsState.screenrecordVideos.length}개 파일 (Clip만)`
-      : `${logsState.screenrecordVideos.length}개 파일`;
-  }
-  if (!visible.length) {
-    host.innerHTML = `<div class="muted logs-empty">${
-      logsState.screenrecordClipOnly ? "Clip 파일이 없습니다." : "화면 녹화 파일이 없습니다."
-    }</div>`;
+  if (!logsState.screenrecordVideos.length) {
+    host.innerHTML = `<div class="muted logs-empty">화면 녹화 파일이 없습니다.</div>`;
     return;
   }
-  host.innerHTML = visible.map((video) => {
+  host.innerHTML = logsState.screenrecordVideos.map((video) => {
     const checked = logsState.screenrecordSelected.has(video.id) ? "checked" : "";
     return `
       <div class="screenrecord-item" data-id="${escapeHtml(video.id)}">
@@ -335,14 +333,11 @@ function toggleScreenrecordItem(id, checked) {
 }
 
 function screenrecordSelectAll() {
-  // 필터(Clip만)가 켜져 있으면 화면에 보이는 항목만 전체선택/해제 대상으로
-  // 삼는다 — 안 보이는 항목이 사용자 모르게 선택되는 걸 방지.
-  const visible = getVisibleScreenrecordVideos();
-  const allSelected = visible.every((v) => logsState.screenrecordSelected.has(v.id));
+  const allSelected = logsState.screenrecordVideos.every((v) => logsState.screenrecordSelected.has(v.id));
   if (allSelected) {
-    visible.forEach((v) => logsState.screenrecordSelected.delete(v.id));
+    logsState.screenrecordSelected.clear();
   } else {
-    visible.forEach((v) => logsState.screenrecordSelected.add(v.id));
+    logsState.screenrecordVideos.forEach((v) => logsState.screenrecordSelected.add(v.id));
   }
   renderScreenrecordList();
 }
@@ -695,7 +690,7 @@ function bindLogsEvents() {
   if (btnDashcamUploadSelected) btnDashcamUploadSelected.onclick = () => uploadSelectedFiles("dashcam");
 
   const btnScreenrecordClipOnly = document.getElementById("btnScreenrecordClipOnly");
-  if (btnScreenrecordClipOnly) btnScreenrecordClipOnly.onclick = () => screenrecordToggleClipOnly();
+  if (btnScreenrecordClipOnly) btnScreenrecordClipOnly.onclick = () => screenrecordSelectClipsOnly();
 
   const btnScreenrecordSelectAll = document.getElementById("btnScreenrecordSelectAll");
   if (btnScreenrecordSelectAll) btnScreenrecordSelectAll.onclick = () => screenrecordSelectAll();

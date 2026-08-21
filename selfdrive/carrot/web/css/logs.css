@@ -22,12 +22,6 @@
   color: var(--md-on-primary);
 }
 
-/* 화면 녹화 툴바의 "Clip만" 필터 토글 버튼 — 켜져 있을 때 강조 */
-.smallBtn.is-active {
-  background: var(--md-primary);
-  color: var(--md-on-primary);
-}
-
 .logs-refresh-btn {
   flex: 0 0 auto;
   display: inline-flex;
