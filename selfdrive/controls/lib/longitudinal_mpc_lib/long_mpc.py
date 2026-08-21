@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import time
+import collections
 import numpy as np
 from cereal import log
 from opendbc.car.interfaces import ACCEL_MIN
@@ -211,6 +212,53 @@ VISION_CLOSING_RATE_MIN_TIME = 0.5   # s   : 이 시간 이상 연속 추적(비
                                       # 빠르지만 초기 수렴폭이 작으므로 danger 판정이 다소 보수적으로
                                       # 나올 수 있음 -- 실측으로 추가 단축 여지 판단 필요)
 
+# --- 곡선 구간 dRel 스냅 노이즈 대응 (2026-08-21, 25차 실주행 재현) ---
+# 증상/원인: 23차 로그 분석에서 곡선(src=vturn) 구간에 도로 가장자리의
+# 대형/정차 차량이 리드 후보 셋에 간헐적으로 혼입되며 leadDRel이 한 프레임
+# 만에 8m+ 튀었다가(노이즈) 곧 원래 값 근처로 복귀하는 "스냅-복귀" 패턴이
+# 확인됨(devnotes toolkit curve_lead_dRel_jump_consistency() 참고, 91.7%가
+# 이 패턴). 위 VISION_CLOSING_RATE_TAU 저역통과 필터는 단일 프레임 raw_rate를
+# 바로 입력으로 쓰기 때문에, 이런 순간 스냅 하나가 alpha(=dt/TAU≈0.05) 비중
+# 만큼이라도 즉시 _vision_dRel_rate를 오염시켜 노이즈성 DANGER급 TTC를
+# 유발할 수 있음(23차 routeB seg12 t=815/817, 필터링 후 값 기준 -12~-25m/s
+# 관측).
+#
+# devnotes의 오프라인 분석(curve_lead_dRel_jump_consistency)은 점프 이후
+# "미래" 1.5초 구간을 봐서 복귀 여부를 판단하지만, 실시간 제어 코드는 미래를
+# 볼 수 없다. 대신 두 단계로 근사한다:
+# 1) raw_rate를 물리적으로 타당한 최대치로 클램프 -- 곡선 노이즈 스냅
+#    (한 프레임 dt=0.05s에 8m+ 점프 -> raw_rate 160m/s+)은 실제 어떤 동일
+#    차로 선행차 시나리오보다도 압도적으로 크므로 클램프만으로도 원천 차단.
+# 2) 클램프된 raw_rate를 저역통과 필터에 바로 먹이지 않고, 최근 N프레임의
+#    "중앙값"을 먼저 취한 뒤 필터에 넣는다 -- 노이즈 스냅은 한두 프레임짜리
+#    "튀었다 복귀"이므로 중앙값 윈도우 안에서 다수결에 밀려 걸러지고, 진짜
+#    지속적인 접근(여러 프레임 연속 같은 방향)은 중앙값에도 그대로 반영된다.
+#    devnotes의 monotonic_frac/reverted 체크가 노리는 것과 동일한 효과를
+#    미래를 보지 않고 얻는 방식.
+VISION_CLOSING_RATE_MAX_PLAUSIBLE = 30.0  # m/s : 이보다 빠른(음의) 순간 dRel 변화율은 물리적으로 불가능한
+                                           #        노이즈로 간주해 클램프 (동일 차로 선행차 시나리오 기준 넉넉한 상한)
+VISION_CLOSING_RATE_MEDIAN_WINDOW = 3     # 프레임 : 최근 N개 클램프된 raw_rate의 중앙값을 필터 입력으로 사용
+                                           #          (DT_MDL=0.05s 기준 최대 0.1s 지연 추가, 곡선 노이즈 스냅 억제용)
+
+# --- Vision-only closing-rate 절대값 게이트 (2026-08-21, 25차) ---
+# 증상: 25차 실주행 화면녹화 영상 판독 결과, 원거리(dRel 85~120m)에서
+# closing rate가 5m/s 안팎으로 뚜렷이 존재하는데도 TTC(=dRel/rate, 이
+# 거리에서 15~20s+)가 LEAD_ACQ_TTC_CAUTION(6.0s) 문턱을 한참 못 넘어
+# a_target이 거의 변화 없이 유지되는 구간이 다수 관찰됨. 22~24차에서 이미
+# 파악한 "TTC 캐션 문턱이 원거리에서 구조적으로 안 넘어간다"는 한계와
+# 일치.
+#
+# 대응: 위에서 정제한 _vision_dRel_rate(클램프+중앙값 필터로 곡선 노이즈
+# 억제된 값) 자체가 이미 상황적으로 위험한 접근속도라면, 거리가
+# 멀어서 TTC가 아직 문턱을 못 넘었더라도 별도 성분(frac_rate)으로 개입
+# 강도를 끌어올린다. frac_time/frac_ttc와 마찬가지로 순수 바닥(floor) 역할만
+# 하며 최종적으로 max()로 합쳐지므로 감속을 완화시키는 방향으로는 절대
+# 작동하지 않는다.
+# 문턱값은 22차에서 설계된 대안 2번 그대로: CAUTION -5.5m/s(약 20km/h
+# 상대속도)부터 서서히 개입 시작, DANGER -10.0m/s부터 최대 강도.
+VISION_CLOSING_RATE_GATE_CAUTION = -5.5   # m/s : 이보다 느리게 닫히면(0에 가까우면) rate 기반 개입 없음
+VISION_CLOSING_RATE_GATE_DANGER  = -10.0  # m/s : 이보다 빠르게 닫히면 거리(TTC) 무관 최대 강도(frac_rate=1.0)
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -371,6 +419,8 @@ class LongitudinalMpc:
     # vision-only closing-rate cross-check state (see VISION_CLOSING_RATE_* below)
     self._vision_dRel_prev = None        # 직전 프레임 dRel (레이더 미확인 상태에서만 갱신)
     self._vision_dRel_rate = 0.0         # 저역통과 필터링된 dRel 변화율(m/s), 음수=접근중
+    self._vision_dRel_rate_window = collections.deque(maxlen=VISION_CLOSING_RATE_MEDIAN_WINDOW)
+                                          # 클램프된 raw_rate 최근 N프레임 (중앙값 필터용, 곡선 노이즈 스냅 억제)
 
 
   def reset(self):
@@ -522,6 +572,7 @@ class LongitudinalMpc:
         self._lead_acq_timer = 0.0
         self._vision_dRel_prev = None
         self._vision_dRel_rate = 0.0
+        self._vision_dRel_rate_window.clear()
       # else: within grace -- freeze state as-is, don't reset. If the lead
       # reappears next cycle, an already-started ramp just keeps going from
       # where it left off instead of restarting.
@@ -549,17 +600,27 @@ class LongitudinalMpc:
       dRel_now = float(radarstate.leadOne.dRel)
       if self._vision_dRel_prev is not None:
         raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
+        # 곡선 노이즈 스냅 클램프 (VISION_CLOSING_RATE_MAX_PLAUSIBLE 위 주석 참고) --
+        # 접근 방향(음수)만 클램프한다. 멀어지는 방향(양수) 스냅은 급브레이크
+        # 유발 리스크가 없으므로 그대로 둔다.
+        raw_rate_clamped = max(raw_rate, -VISION_CLOSING_RATE_MAX_PLAUSIBLE)
+        self._vision_dRel_rate_window.append(raw_rate_clamped)
+        # 중앙값을 필터 입력으로 사용 -- 한두 프레임짜리 스냅-복귀는 윈도우 내
+        # 다수결에 밀려 걸러지고, 지속적인 접근은 중앙값에도 그대로 반영된다.
+        rate_for_filter = float(np.median(self._vision_dRel_rate_window))
         alpha = float(np.clip(self.dt / VISION_CLOSING_RATE_TAU, 0.0, 1.0))
-        self._vision_dRel_rate = self._vision_dRel_rate * (1. - alpha) + raw_rate * alpha
+        self._vision_dRel_rate = self._vision_dRel_rate * (1. - alpha) + rate_for_filter * alpha
       self._vision_dRel_prev = dRel_now
     elif lead_one_status_now and radarstate.leadOne.radar:
       # radar just confirmed -- reset immediately, no grace (see comment above).
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
+      self._vision_dRel_rate_window.clear()
     elif self._lead_absent_timer > LEAD_ACQ_LOSS_GRACE_TIME:
       # lead genuinely gone (grace exceeded) -- reset for a fresh start next time.
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
+      self._vision_dRel_rate_window.clear()
     # else: brief status blip within grace -- freeze dRel_prev/rate as-is.
     # If the lead reappears next cycle with radar still unlocked, the rate
     # estimate resumes accumulating instead of restarting from zero. Note
@@ -640,9 +701,24 @@ class LongitudinalMpc:
 
       frac_ttc = float(np.clip((LEAD_ACQ_TTC_CAUTION - ttc_now) / (LEAD_ACQ_TTC_CAUTION - LEAD_ACQ_TTC_DANGER), 0.0, 1.0))
 
-      # take the stronger of the two -- this stays a pure floor and never
-      # softens braking versus either component alone.
-      frac = max(frac_time, frac_ttc)
+      # vision-only closing-rate absolute gate (see VISION_CLOSING_RATE_GATE_*
+      # above): at long range, TTC = dRel / rate never crosses the caution
+      # threshold even when the closing rate itself is already dangerous
+      # (dRel large keeps TTC large regardless of rate) -- frac_ttc alone
+      # structurally can't catch that case. This component looks at the
+      # (curve-noise-filtered) rate directly, independent of distance, so a
+      # genuinely fast approach still raises the floor even while still far
+      # away. Same continuous-tracking gate (VISION_CLOSING_RATE_MIN_TIME) as
+      # the TTC cross-check, and only vision-only (no radar lock yet).
+      frac_rate = 0.0
+      if (not radarstate.leadOne.radar) and self._lead_acq_timer >= VISION_CLOSING_RATE_MIN_TIME:
+        frac_rate = float(np.clip(
+          (VISION_CLOSING_RATE_GATE_CAUTION - self._vision_dRel_rate) /
+          (VISION_CLOSING_RATE_GATE_CAUTION - VISION_CLOSING_RATE_GATE_DANGER), 0.0, 1.0))
+
+      # take the strongest of the three -- this stays a pure floor and never
+      # softens braking versus any component alone.
+      frac = max(frac_time, frac_ttc, frac_rate)
       if frac > 0.0:
         # virtual reference: an object exactly at the standard current-speed
         # follow distance, assumed to move with ego (matching speed) across the
