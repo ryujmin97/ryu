@@ -177,8 +177,8 @@ void ScreenRecoder::stop_locked(bool auto_rollover) {
   }
   closeEncoder();
 
-  // 메인 파일은 이미 finalize됐으므로, 정지 시점을 기준으로 마지막 20초를
-  // 별도 clip으로 잘라낸다. 녹화 길이가 20초 미만이어도 (전체 길이만큼)
+  // 메인 파일은 이미 finalize됐으므로, 정지 시점을 기준으로 마지막 30초를
+  // 별도 clip으로 잘라낸다. 녹화 길이가 30초 미만이어도 (전체 길이만큼)
   // 항상 생성 — clip 파일을 목록에서 구분하기 쉽게 하기 위함.
   // 단, 20분 자동 세그먼트 롤오버(auto_rollover=true)로 인한 정지는
   // 사용자가 정지 버튼을 누른 게 아니므로 clip을 만들지 않는다 —
@@ -234,11 +234,11 @@ void ScreenRecoder::extract_trailing_clip(const std::string& source_path) {
 
   // stream copy(-c copy, 재인코딩 없음)라 빠르고 화질 손실 없음. -sseof를
   // -i보다 앞에 둬서(입력 시크) 가장 가까운 키프레임 기준으로 빠르게
-  // seek -> 실제 클립 길이는 약 20.0~20.8초(키프레임 간격만큼 오차).
-  // 원본 길이가 20초 미만이면 ffmpeg가 처음부터 잘라줌(요청대로 항상 생성).
+  // seek -> 실제 클립 길이는 약 30.0~30.8초(키프레임 간격만큼 오차).
+  // 원본 길이가 30초 미만이면 ffmpeg가 처음부터 잘라줌(요청대로 항상 생성).
   QStringList args;
   args << "-y"
-       << "-sseof" << "-20"
+       << "-sseof" << "-30"
        << "-i" << QString::fromStdString(source_path)
        << "-c" << "copy"
        << QString::fromStdString(clip_path);
