@@ -225,10 +225,24 @@ class CarrotServ:
     # noise_tol(0.3km/h)은 모델 예측값의 프레임간 미세 흔들림까지 "감소"로
     # 오판해 카운터가 계속 리셋되는 것을 막기 위한 허용폭 -- 실차 검증 후
     # 필요시 조정.
-    self.model_turn_speed_prev = None                # 직전 프레임 model_turn_speed (추세 판단용)
-    self.model_turn_speed_noise_tol = 0.3             # km/h, 이보다 작은 하락은 노이즈로 간주(감소로 안 침)
-    self.model_turn_straight_hold_sec = 0.6           # 이 시간 이상 연속으로 "감소 없음"이어야 model 후보 배제
-    self.model_turn_straight_count = 0                # 연속 "감소 없음" 프레임 카운터 (20Hz 루프 기준)
+    #
+    # [50차 재설계] 위 "직전 프레임 대비 비감소 연속" 방식은 실측(route1
+    # 203f99d429 seg8) 결과 완만한 하강 추세 중의 잔떨림(프레임간 noise_tol
+    # 0.3km/h를 넘는 상승 튐)에도 카운터가 계속 리셋되어, 정작 커브에 접근
+    # 중인 구간(vEgo가 계속 가속하는데 model_turn_speed는 91~108km/h로
+    # 안정적으로 낮게 유지되던 11초 구간)에서도 트레일링으로 오판, model
+    # 후보가 반복적으로 배제됨을 확인(FINDINGS.md 50차 항목). 이 때문에
+    # 실제 감속 트리거가 apex 3초 전까지 늦춰지는 문제가 있었다.
+    # 대응: "직전 프레임 대비"가 아니라 "최근 확인된 최저점(min_recent)
+    # 대비 recover_margin(3km/h) 이상 지속 회복"으로 트레일링을 판정한다.
+    # 완만한 하강 중의 잔떨림은 min_recent를 거의 갱신하지 못해도 margin
+    # 안에서 계속 "회복 아님"으로 유지되므로 카운터가 리셋되지 않고, 실제로
+    # 커브를 빠져나와 뚜렷하게 반등하는 경우만 hold_sec 동안 margin을
+    # 초과 유지해 트레일링으로 확정된다.
+    self.model_turn_speed_min_recent = None           # 최근 확인된 model_turn_speed 최저점(트레일링 판단 기준선)
+    self.model_turn_recover_margin = 3.0              # km/h, 이 폭 이상 최저점 위로 지속 회복해야 트레일링으로 침
+    self.model_turn_straight_hold_sec = 0.6           # 이 시간 이상 연속 회복 유지돼야 model 후보 배제
+    self.model_turn_straight_count = 0                # 연속 "회복 유지" 프레임 카운터 (20Hz 루프 기준)
 
     self.debugText = ""
 
@@ -1029,26 +1043,37 @@ class CarrotServ:
     model_turn_speed = max(sm['modelV2'].meta.modelTurnSpeed, self.autoCurveSpeedLowerLimit)
 
     # model_turn_speed 자기 자신의 추세로 "트레일링(커브를 이미 빠져나와
-    # 복귀 중)" 여부를 판단 (위 __init__ 주석 참고, 11차 재설계).
-    # desiredCurvature(현재 곡률) 대신 이 값 자체의 증감을 보는 이유:
-    # model_turn_speed가 하강 중이면(=커브 접근하며 사전감속 시도 중)
-    # 노이즈 허용폭을 넘는 하락이 단 한 프레임만 있어도 즉시 카운터가
-    # 리셋되어 배제되지 않는다 -- 오직 "한 번도 (유의미하게) 감소하지
-    # 않고 계속 높거나 반등 중"인 구간만 트레일링으로 확정한다.
-    if self.model_turn_speed_prev is None:
-      is_non_decreasing = True   # 첫 프레임은 비교 대상이 없으므로 보수적으로 통과
-    else:
-      is_non_decreasing = (model_turn_speed >= self.model_turn_speed_prev - self.model_turn_speed_noise_tol)
-    self.model_turn_speed_prev = model_turn_speed
+    # 복귀 중)" 여부를 판단 (위 __init__ 주석 참고, 11차 도입 / 50차
+    # min_recent+margin 방식으로 재설계).
+    # "최근 확인된 최저점(min_recent) 대비 recover_margin km/h 이상 지속
+    # 회복"일 때만 트레일링으로 확정한다. 완만한 하강 추세 중의 프레임간
+    # 잔떨림(상승 튐)은 margin 안이라 min_recent를 갱신 못해도 카운터가
+    # 리셋되지 않고, 실제로 커브를 빠져나와 뚜렷하게 반등하는 경우만
+    # hold_sec 동안 margin을 초과 유지해 트레일링으로 잡힌다.
+    if self.model_turn_speed_min_recent is None:
+      self.model_turn_speed_min_recent = model_turn_speed
 
-    if is_non_decreasing:
-      self.model_turn_straight_count += 1
-    else:
+    if model_turn_speed <= self.model_turn_speed_min_recent + self.model_turn_recover_margin:
       self.model_turn_straight_count = 0
+      self.model_turn_speed_min_recent = min(self.model_turn_speed_min_recent, model_turn_speed)
+    else:
+      self.model_turn_straight_count += 1
     # carrot_man 브로드캐스트 루프 주기와 동일 (Ratekeeper(20) -> 0.05s/frame)
     model_turn_confirmed_trailing = (self.model_turn_straight_count * 0.05) >= self.model_turn_straight_hold_sec
+    if model_turn_confirmed_trailing:
+      # 트레일링 확정 -- 다음 커브 사이클을 위해 기준선을 현재값으로 리셋
+      self.model_turn_speed_min_recent = model_turn_speed
 
-    if model_turn_speed < 200 and abs(vturn_speed) < 120 and not model_turn_confirmed_trailing:
+    # [50차 제거] 기존 "abs(vturn_speed) < 120" 게이트는 vturn 원시값이
+    # 원거리에서 극도로 불안정(부호까지 요동, -249~249 관측)해 실제로는
+    # 커브가 다가오고 있어도 이 조건에 계속 걸려 model 후보 자체가 min()
+    # 경쟁에서 배제되는 경우가 실측으로 확인됨(route1 203f99d429 seg8,
+    # FINDINGS.md 50차 항목 -- vEgo가 11초간 가속하는데 model은 이미
+    # 안정적으로 낮은 값을 유지하고도 배제됨). 트레일링 판정이 위에서
+    # 재설계되어 자체적으로 "커브 접근 vs 이탈 후 복귀"를 구분하므로,
+    # vturn 절대값과 무관하게 model_turn_speed<200(=유의미한 커브 감지)
+    # 여부와 트레일링 여부만으로 참여를 결정한다.
+    if model_turn_speed < 200 and not model_turn_confirmed_trailing:
       speed_n_sources.append((model_turn_speed, "model"))
 
     desired_speed, source = min(speed_n_sources, key=lambda x: x[0])
