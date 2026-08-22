@@ -54,6 +54,19 @@ LEAD_BLEND_BIG_JUMP_DIST    = 15.0 # m : 이보다 큰 '안전 방향' 점프는
                                     #     수 있음. 정체 구간 비전 트랙 흔들림에서 실측: route1
                                     #     t=1388~1390s / route2 t=825~827s)
 
+# --- SCC 단일점 폴백 안전 게이트 (37차) ---
+# get_lead()에서 비전 매칭 실패/저확신(prob<.6) 시 track_scc(단일점 SCC
+# 레이더, trackId=0)를 차로내 위치 검증 없이 그대로 채택하던 문제 대응.
+# [NEEDS_VALIDATION] 실차 로그 4건(옆차선 3건 dPath 미실측 -- 당시는 yRel
+# -5.5~-10.5m로 게이트 자체가 불필요할 만큼 명백; 저속 도심 커브 1건은
+# yRel -1.4~-1.5m로 단순 yRel 게이트로는 못 거를 가능성 있었음)을 근거로
+# dPath(차선 중심 대비, 곡률/차선폭 보정 포함) 기준으로 설계 -- 이 상수
+# 자체의 실차 재검증은 아직 없음. CUTOUT_DPATH_THRESH(2.0)와 동일 철학:
+# "이 값을 넘으면 이미 차로를 벗어난 것으로 간주"를 폴백 채택 시점에도
+# 선제 적용.
+SCC_FALLBACK_DPATH_GATE  = 2.0  # m : track_scc.dPath가 이보다 크면(차로 밖으로
+                                 #     판단) 폴백으로 채택하지 않음
+
 
 def laplacian_pdf(x: float, mu: float, b: float):
   diff = abs(x - mu) / max(b, 1e-4)
@@ -155,7 +168,7 @@ class Track:
     self._vLead_filt = alpha * v_clamped + (1.0 - alpha) * self._vLead_filt
     return float(self._vLead_filt)
 
-  def get_RadarState(self, model_prob: float = 0.0, vision_y_rel=0.0):
+  def get_RadarState(self, model_prob: float = 0.0, vision_y_rel=0.0, scc_fallback: bool = False):
     return {
       "dRel": float(self.dRel),
       "yRel": float(self.yRel) if self.yRel != 0.0 else vision_y_rel,
@@ -174,6 +187,10 @@ class Track:
       "radar": True,
       "radarTrackId": self.identifier,
       "score": self.score,
+      # 37차: track_scc(단일점 SCC 폴백, 차로내 위치 무검증 채택) 유래인지 표시.
+      # True면 RadarD.update()에서 LeadBlend 우회(즉시 반영)를 하지 않고
+      # cutout/danger-passthrough 로직을 계속 태운다.
+      "sccFallback": bool(scc_fallback),
     }
 
   def potential_low_speed_lead(self, v_ego: float):
@@ -665,8 +682,9 @@ class RadarD:
 
       alive_tracks = {tid: trk for tid, trk in self.tracks.items() if trk.cnt > 2 }
       lead_one_raw, self.radar_detected = self.get_lead(sm['carState'], md, alive_tracks, 0, leads_v3[0], model_v_ego, low_speed_override=False)
-      if lead_one_raw.get('radar'):
-        # 빨간박스: SCC 레이더 락온 상태. 이미 안정적인 실측값이므로 블렌딩 지연 없이 그대로 사용.
+      if lead_one_raw.get('radar') and not lead_one_raw.get('sccFallback'):
+        # 빨간박스: 비전과 교차검증된 레이더 트랙(또는 다중레이더) 락온 상태.
+        # 이미 안정적인 실측값이므로 블렌딩 지연 없이 그대로 사용.
         # prev는 계속 갱신해둬서, 이후 파란박스(비전)로 전환되는 순간 블렌딩이 오래된 값부터
         # 시작하지 않도록 함.
         self.radar_state.leadOne = lead_one_raw
@@ -674,7 +692,11 @@ class RadarD:
         self.lead_blend.miss_cnt = 0
         self.lead_blend.danger_hold_cnt = 0
       else:
-        # 파란박스: 비전만으로 추적 중. 트랙전환/미스 노이즈가 있으니 LeadBlend로 디바운싱.
+        # 파란박스(비전) 또는 sccFallback(37차: 단일점 SCC 폴백, 비전 교차검증
+        # 없이 채택된 트랙 -- 옆차선/경로이탈 물체 오탐 위험). 두 경우 모두
+        # LeadBlend로 디바운싱(cutout/danger-passthrough 그대로 적용).
+        # 위험한 변화(TTC 급락/closer_jump)는 danger-passthrough 경로로
+        # 즉시 반영되므로 반응속도 저하는 없음 -- 완만한 케이스만 스무딩됨.
         self.radar_state.leadOne = self.lead_blend.update(lead_one_raw, DT_MDL)
       self.radar_state.leadTwo, _ = self.get_lead(sm['carState'], md, alive_tracks, 1, leads_v3[1], model_v_ego, low_speed_override=False)
 
@@ -711,15 +733,26 @@ class RadarD:
     else:
       track = None
 
+    used_scc_fallback = False
     if (track is None or lead_msg.prob < .6) and track_scc is not None and track_scc.cnt > 2:
       #if self.enable_radar_tracks in [-1, 2] or model_v_ego < 5 or track_scc.vLead < 5.0:
       if self.enable_radar_tracks == -1 or (self.enable_radar_tracks >= 2 and track_scc.vLead < 5.0):
-        track = track_scc      
+        # 37차: track_scc는 비전 대응 없이 무조건 채택되는 단일점 폴백이라
+        # 옆차선/주행경로 밖 정지물체를 걸러낼 안전장치가 없었음. dPath로
+        # 차로내 위치를 선제 검증 -- 게이트를 넘으면(명백히 차로 밖) 폴백
+        # 자체를 채택하지 않는다. 이 검증은 track이 이미 있었는지 여부와
+        # 무관하게 항상 적용(있었으면 그 기존 track을 유지, 없었으면
+        # vision-only 경로로 자연스럽게 넘어감) -- track이 이미 있다고
+        # 게이트를 건너뛰면 저확신(prob<.6) 케이스에서 검증을 우회하는
+        # 구멍이 그대로 남는다.
+        if abs(track_scc.dPath) < SCC_FALLBACK_DPATH_GATE:
+          track = track_scc
+          used_scc_fallback = True
 
     lead_dict = {'status': False}
     radar = False
     if track is not None:
-      lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel)
+      lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel, scc_fallback=used_scc_fallback)
       radar = True
     elif (track is None) and ready and (lead_msg.prob > .5):
         lead_dict = self.vision_tracks[index].get_lead(md)
