@@ -168,7 +168,7 @@ class Track:
     self._vLead_filt = alpha * v_clamped + (1.0 - alpha) * self._vLead_filt
     return float(self._vLead_filt)
 
-  def get_RadarState(self, model_prob: float = 0.0, vision_y_rel=0.0, scc_fallback: bool = False):
+  def get_RadarState(self, model_prob: float = 0.0, vision_y_rel=0.0):
     return {
       "dRel": float(self.dRel),
       "yRel": float(self.yRel) if self.yRel != 0.0 else vision_y_rel,
@@ -187,10 +187,6 @@ class Track:
       "radar": True,
       "radarTrackId": self.identifier,
       "score": self.score,
-      # 37차: track_scc(단일점 SCC 폴백, 차로내 위치 무검증 채택) 유래인지 표시.
-      # True면 RadarD.update()에서 LeadBlend 우회(즉시 반영)를 하지 않고
-      # cutout/danger-passthrough 로직을 계속 태운다.
-      "sccFallback": bool(scc_fallback),
     }
 
   def potential_low_speed_lead(self, v_ego: float):
@@ -681,8 +677,8 @@ class RadarD:
         self.vision_tracks[1].update(leads_v3[1], model_v_ego, self.v_ego, md)
 
       alive_tracks = {tid: trk for tid, trk in self.tracks.items() if trk.cnt > 2 }
-      lead_one_raw, self.radar_detected = self.get_lead(sm['carState'], md, alive_tracks, 0, leads_v3[0], model_v_ego, low_speed_override=False)
-      if lead_one_raw.get('radar') and not lead_one_raw.get('sccFallback'):
+      lead_one_raw, self.radar_detected, lead_one_scc_fallback = self.get_lead(sm['carState'], md, alive_tracks, 0, leads_v3[0], model_v_ego, low_speed_override=False)
+      if lead_one_raw.get('radar') and not lead_one_scc_fallback:
         # 빨간박스: 비전과 교차검증된 레이더 트랙(또는 다중레이더) 락온 상태.
         # 이미 안정적인 실측값이므로 블렌딩 지연 없이 그대로 사용.
         # prev는 계속 갱신해둬서, 이후 파란박스(비전)로 전환되는 순간 블렌딩이 오래된 값부터
@@ -698,7 +694,7 @@ class RadarD:
         # 위험한 변화(TTC 급락/closer_jump)는 danger-passthrough 경로로
         # 즉시 반영되므로 반응속도 저하는 없음 -- 완만한 케이스만 스무딩됨.
         self.radar_state.leadOne = self.lead_blend.update(lead_one_raw, DT_MDL)
-      self.radar_state.leadTwo, _ = self.get_lead(sm['carState'], md, alive_tracks, 1, leads_v3[1], model_v_ego, low_speed_override=False)
+      self.radar_state.leadTwo, _, _ = self.get_lead(sm['carState'], md, alive_tracks, 1, leads_v3[1], model_v_ego, low_speed_override=False)
 
       self.lane_line_available = md.laneLineProbs[1] > 0.5 and md.laneLineProbs[2] > 0.5
       self.compute_leads(self.v_ego, alive_tracks, md)
@@ -752,7 +748,7 @@ class RadarD:
     lead_dict = {'status': False}
     radar = False
     if track is not None:
-      lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel, scc_fallback=used_scc_fallback)
+      lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel)
       radar = True
     elif (track is None) and ready and (lead_msg.prob > .5):
         lead_dict = self.vision_tracks[index].get_lead(md)
@@ -770,7 +766,7 @@ class RadarD:
           #lead_dict = closest_track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel, self.vision_tracks[0].vLat)
           lead_dict = closest_track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel)
 
-    return lead_dict, radar
+    return lead_dict, radar, used_scc_fallback
 
   def compute_leads(self, v_ego, tracks, md):
     lead_msg = md.leadsV3[0] if (md is not None and len(md.position.x) == 33) else None
