@@ -45,14 +45,18 @@ ScreenRecoder::ScreenRecoder(QWidget* parent) : QPushButton(parent), image_queue
   src_width = 2160;
   src_height = 1080;
 
-  dst_height = 720;
+  // 720p(2Mbps)는 화질 대비 용량이 큰 편이라는 피드백 -> 540p/1.2Mbps로
+  // 낮춰 clip 용량을 줄인다(30초 clip 기준 대략 화소수 56%(720p->540p)
+  // x 비트레이트 60%(2Mbps->1.2Mbps) ≈ 1/3 수준으로 예상). 화면 텍스트
+  // 가독성이 실사용에서 부족하면 dst_height/bitrate만 다시 올리면 됨.
+  dst_height = 540;
   dst_width = src_width * dst_height / src_height;
   if (dst_width % 2 != 0)
     dst_width += 1;
 
   rgb_buffer = std::make_unique<uint8_t[]>(src_width * src_height * 4);
   rgb_scale_buffer = std::make_unique<uint8_t[]>(dst_width * dst_height * 4);
-  encoder = std::make_unique<OmxEncoder>(path.c_str(), dst_width, dst_height, UI_FREQ, 2 * 1024 * 1024, false, false);
+  encoder = std::make_unique<OmxEncoder>(path.c_str(), dst_width, dst_height, UI_FREQ, 6 * 1024 * 1024 / 5, false, false);
 }
 
 ScreenRecoder::~ScreenRecoder() {
