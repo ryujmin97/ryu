@@ -151,6 +151,21 @@ LEAD_ACCEL_WEIGHT_RISE_RATE = 1.0  # 1/s : weight가 0->1까지 올라가는 데
                                     # 우회하므로 진짜 위급 상황 반응은 지연되지 않음)
 
 
+# 2026-08-22 실주행 로그 대응 ("정지 후 출발 가속 약화" 이슈, FINDINGS.md 45차):
+# ttc_accel_weight()의 closing<=0.1(=벌어짐/등속) -> weight=0 분기는 "위험하지 않은
+# 잡음성 가감속 무시"가 목적이었으나, 정차->출발 직후는 정확히 이 조건(자차는 아직
+# 0 근방, 앞차는 이미 가속 중이라 v_ego<=v_lead)과 겹쳐 앞차의 실측 가속(aLeadK)이
+# extrapolate_lead()에서 통째로 사라지고, 그 결과 출발 시 목표가속도가 38차 이전보다
+# 보수적으로 산출됨(가속이 매끈하게 안 이어지고 톱니형으로 끊기는 체감).
+# 대응: "정차->출발" 구간을 별도 상태로 잡아 이 구간에서만 ttc_accel_weight()(38차)를
+# 완전히 우회하고, 38차 patch 이전과 동일하게 margin_accel_weight()(dist_w)만으로
+# a_lead damping을 결정한다. 출발이 끝나(LAUNCH_EXIT_V_EGO 이상) 정상 주행 속도로
+# 올라가면 즉시 38차/39차 로직으로 복귀 -- 38차가 막으려던 고속 잡음성 가감속
+# 과잉반응 방지는 이 구간(저속) 밖이라 영향 없음.
+LAUNCH_BYPASS_STOP_V_EGO = 0.3   # m/s : 이하이면 "정차"로 판정(bypass 진입 준비 상태)
+LAUNCH_BYPASS_EXIT_V_EGO = 5.0   # m/s : 정차에서 출발한 뒤 이 속도를 넘으면 38차 로직으로 복귀
+
+
 def ttc_accel_weight(dRel, v_ego, v_lead):
   closing = v_ego - v_lead
   if closing <= 0.1:
@@ -470,6 +485,9 @@ class LongitudinalMpc:
     # lead-accel damping weight rise-rate limit state (see LEAD_ACCEL_WEIGHT_RISE_RATE below)
     self._lead_accel_weight_prev = 1.0   # 직전 사이클 weight -- 초기값 1.0(무감쇠)이 안전측 기본값
 
+    # launch bypass state (see LAUNCH_BYPASS_* above, FINDINGS.md 45차)
+    self._launch_bypass_active = False   # True인 동안 ttc_accel_weight()(38차) 완전 우회
+
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -550,6 +568,14 @@ class LongitudinalMpc:
   
   def process_lead(self, lead, j_lead):
     v_ego = self.x0[1]
+
+    # launch bypass state update (FINDINGS.md 45차) -- 정차->출발 감지는 리드 유무와
+    # 무관하게 v_ego만으로 판단하므로 lead 분기 이전에 갱신한다.
+    if v_ego < LAUNCH_BYPASS_STOP_V_EGO:
+      self._launch_bypass_active = True    # 정차 상태 -- bypass 진입 arm
+    elif v_ego >= LAUNCH_BYPASS_EXIT_V_EGO:
+      self._launch_bypass_active = False   # 출발 완료(가속 계속) -- 38차 로직 복귀
+
     if lead is not None and lead.status:
       x_lead = lead.dRel
       v_lead = lead.vLead
@@ -564,14 +590,27 @@ class LongitudinalMpc:
       # v_ego, see LEAD_ACCEL_TTC_GATE_* comment above). self.desired_distance
       # is the previous cycle's value (one 0.05s-old sample) -- negligible staleness.
       dist_w = margin_accel_weight(x_lead, self.desired_distance)
-      ttc_w = ttc_accel_weight(x_lead, v_ego, v_lead)
+      if self._launch_bypass_active:
+        # 정차->출발 구간(FINDINGS.md 45차): 38차 TTC 게이트를 완전히 우회하고,
+        # 38차 patch 이전과 동일하게 dist_w만으로 damping을 결정한다. 이 구간은
+        # v_ego<=v_lead(=closing<=0.1)가 정상적으로 발생하는 구간이라 ttc_accel_weight()가
+        # 앞차의 실측 가속(aLeadK)을 통째로 지워버리는 부작용이 생기기 때문.
+        ttc_w = 1.0
+      else:
+        ttc_w = ttc_accel_weight(x_lead, v_ego, v_lead)
       w = min(dist_w, ttc_w)
       closing = v_ego - v_lead
       ttc_now = x_lead / closing if closing > 0.1 else float('inf')
       if ttc_now <= LEAD_ACQ_TTC_DANGER:
         # 실제 위험(TTC<=2.5s, radard LeadBlend danger_hold와 동일 임계값)이면
-        # rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을 늦추지 않는다.
+        # rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을 늦추지 않는다. launch bypass
+        # 여부와 무관하게 항상 최우선.
         w = 1.0
+      elif self._launch_bypass_active:
+        # bypass 중엔 39차 rise-rate 제한도 함께 우회 -- 이 제한은 저속에서 TTC가
+        # 급붕괴하며 생기는 급정지 느낌 방지가 목적인데, 출발 가속 구간에서는
+        # 오히려 매끈한 가속 상승을 지연시키는 부작용만 남는다.
+        pass
       elif w > self._lead_accel_weight_prev:
         # rising edge(감쇠가 풀리는 방향)만 사이클당 변화폭 제한 -- 저속에서 TTC가
         # 급격히 붕괴하며 weight가 순간적으로 튀어 aLeadK 누적값이 한꺼번에
