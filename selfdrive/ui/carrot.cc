@@ -2292,7 +2292,6 @@ public:
     char    cruise_speed_last[32] = "";
     char    driving_mode_str_last[32] = "";
     int     gap_last = 0;
-    char    gear_str_last[32] = "";
     int     blink_timer = 0;
     int     disp_timer = 0;
     float cpuTemp = 0.0f;
@@ -2451,11 +2450,6 @@ public:
 
         ui_fill_rect(s->vg, { dx - 35, dy - 70, 70, 80 }, COLOR_GREEN_ALPHA(210), 15, 3, &white_color);
         ui_draw_text(s, dx, dy, gear_str, 70, COLOR_WHITE, BOLD);
-
-        if (strcmp(gear_str, gear_str_last)) {
-            ui_draw_text_a(s, dx, dy, gear_str, 70, COLOR_WHITE, BOLD);
-			strcpy(gear_str_last, gear_str);
-        }
 
         dx = bx + 200;
         dy = by + 175;
