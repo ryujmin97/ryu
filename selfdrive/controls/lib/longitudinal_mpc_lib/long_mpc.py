@@ -134,6 +134,23 @@ def margin_accel_weight(dRel, desired_distance):
   return float(np.clip((MARGIN_ACCEL_GATE_FULL - ratio) / (MARGIN_ACCEL_GATE_FULL - MARGIN_ACCEL_GATE_NONE), 0.0, 1.0))
 
 
+# 2026-08-22 실주행 로그 대응 ("저속_앞차" 이슈): 위 TTC 게이트 자체는 정상 작동하지만
+# 저속 구간에서는 dRel(절대거리)이 작아 동일한 vRel 변화에도 TTC가 훨씬 빠르게(짧은
+# 시간 안에) GATE_NONE(6.0s) 밑으로 떨어진다 -- 예: dRel=16m 근방에서 closing이 1->2.2
+# m/s로만 늘어도 TTC가 16s대에서 6~7s대로 0.5~0.6초 만에 붕괴함(고속에서는 dRel이
+# 커서 같은 vRel 변화가 훨씬 완만한 TTC 변화로 나타남). 이 급격한 weight 상승(0.3->1.0
+# 이 0.6초 안에 발생) 때문에, 그동안 감쇠돼 화면에 안 보이던 aLeadK의 누적된 감속값이
+# 한꺼번에 풀려나오면서 aEgo jerk가 순간적으로 -4~-5 m/s^3까지 튀는 "급정지 느낌"이
+# 발생함(FINDINGS.md 39차 프레임 대조로 확인).
+# 대응: weight가 "안전 -> 위험" 방향(damping 풀림, 값 증가)으로 변할 때만 사이클당
+# 최대 변화폭을 제한한다. 반대로 "위험 -> 안전"(damping 강화, 값 감소) 방향은 즉시
+# 반영 -- 이 방향은 반응을 더 부드럽게 만들 뿐 위험 상황 반응을 지연시키지 않으므로
+# 속도 제한이 필요 없다.
+LEAD_ACCEL_WEIGHT_RISE_RATE = 1.0  # 1/s : weight가 0->1까지 올라가는 데 최소 1.0초 걸리도록 제한
+                                    # (TTC<=LEAD_ACQ_TTC_DANGER 실제위험 시엔 이 제한 자체를
+                                    # 우회하므로 진짜 위급 상황 반응은 지연되지 않음)
+
+
 def ttc_accel_weight(dRel, v_ego, v_lead):
   closing = v_ego - v_lead
   if closing <= 0.1:
@@ -450,6 +467,9 @@ class LongitudinalMpc:
     self._vision_dRel_rate_window = collections.deque(maxlen=VISION_CLOSING_RATE_MEDIAN_WINDOW)
                                           # 클램프된 raw_rate 최근 N프레임 (중앙값 필터용, 곡선 노이즈 스냅 억제)
 
+    # lead-accel damping weight rise-rate limit state (see LEAD_ACCEL_WEIGHT_RISE_RATE below)
+    self._lead_accel_weight_prev = 1.0   # 직전 사이클 weight -- 초기값 1.0(무감쇠)이 안전측 기본값
+
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -545,13 +565,29 @@ class LongitudinalMpc:
       # is the previous cycle's value (one 0.05s-old sample) -- negligible staleness.
       dist_w = margin_accel_weight(x_lead, self.desired_distance)
       ttc_w = ttc_accel_weight(x_lead, v_ego, v_lead)
-      a_lead *= min(dist_w, ttc_w)
+      w = min(dist_w, ttc_w)
+      closing = v_ego - v_lead
+      ttc_now = x_lead / closing if closing > 0.1 else float('inf')
+      if ttc_now <= LEAD_ACQ_TTC_DANGER:
+        # 실제 위험(TTC<=2.5s, radard LeadBlend danger_hold와 동일 임계값)이면
+        # rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을 늦추지 않는다.
+        w = 1.0
+      elif w > self._lead_accel_weight_prev:
+        # rising edge(감쇠가 풀리는 방향)만 사이클당 변화폭 제한 -- 저속에서 TTC가
+        # 급격히 붕괴하며 weight가 순간적으로 튀어 aLeadK 누적값이 한꺼번에
+        # 풀려나오는 것을 막는다. 내려가는 방향(더 감쇠)은 그대로 즉시 반영.
+        w = min(w, self._lead_accel_weight_prev + LEAD_ACCEL_WEIGHT_RISE_RATE * self.dt)
+      self._lead_accel_weight_prev = w
+      a_lead *= w
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0
       v_lead = v_ego + 10.0
       a_lead = 0.0
       a_lead_tau = _LEAD_ACCEL_TAU
+      # 리드가 없는 사이클엔 이전 리드와 무관하므로 다음 리드 재획득 시 불필요한
+      # rise-rate 제한이 이어지지 않도록 리셋(안전측 기본값 1.0으로).
+      self._lead_accel_weight_prev = 1.0
 
     # MPC will not converge if immediate crash is expected
     # Clip lead distance to what is still possible to brake for
