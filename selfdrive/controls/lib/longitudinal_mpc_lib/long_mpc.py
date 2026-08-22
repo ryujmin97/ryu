@@ -109,12 +109,40 @@ def desired_follow_distance(v_ego, v_lead, comfort_brake, stop_distance, t_follo
 MARGIN_ACCEL_GATE_FULL = 1.5  # dRel/desired_distance ratio at/above which aLead is fully damped (weight=0)
 MARGIN_ACCEL_GATE_NONE = 1.0  # dRel/desired_distance ratio at/below which aLead passes through unchanged (weight=1)
 
+# 2026-08-22 실주행 로그 대응 ("앞차_민감" 이슈): 위 dRel/desired_distance 비율만으로는
+# 고속도로 구간에서 damping이 사실상 항상 꺼져 있었다. desired_distance가
+# t_follow*v_ego 항 때문에 속도의 제곱보다 완만하게(선형에 가깝게) 커지는 반면
+# get_safe_obstacle_distance의 v_ego^2/(2*comfort_brake) 항도 동시에 커져서, 실제로는
+# 고속 주행 중 안전한 차간거리(TTC 15s 이상)에서도 ratio가 GATE_NONE(1.0) 밑으로
+# 내려가 weight=1(무감쇠)로 굳어지는 경우가 흔함 -- 60m/28m/s(TTC~15s 수준) 구간에서
+# aLeadK가 -2.7m/s^2까지 흔들리자 aTarget이 그대로 따라가 -2.78m/s^2까지 반응한
+# 사례로 확인됨(FINDINGS.md 38차 참고). ratio 게이트는 "거리 여유"만 보고 "실제 위험
+# (TTC)"은 안 보기 때문에 못 걸러낸 것.
+# 대응: 기존 dRel/desired_distance ratio 게이트에 TTC 기반 게이트를 추가로 곱해(min),
+# "거리 여유가 있고 AND TTC도 여유 있음"일 때만 damping이 걸리도록 한다. TTC 임계값은
+# 이 파일 아래쪽 LEAD_ACQ_TTC_CAUTION/DANGER(선점 감속 램프에서 이미 쓰는 값)와 같은
+# 축을 공유하되, 이 감쇠는 "안전 확인 후 무시"가 목적이므로 CAUTION(6.0s)을 완전
+# 무감쇠(weight=1) 경계로, 그보다 넉넉한 12.0s를 완전 감쇠(weight=0) 경계로 잡는다.
+LEAD_ACCEL_TTC_GATE_FULL = 12.0  # TTC(s) 이상이면 aLead 완전 감쇠(weight=0) -- NEEDS_VALIDATION
+LEAD_ACCEL_TTC_GATE_NONE = 6.0   # TTC(s) 이하이면 aLead 무감쇠(weight=1), LEAD_ACQ_TTC_CAUTION과 동일 값
+
 
 def margin_accel_weight(dRel, desired_distance):
   if desired_distance <= 1.0:
     return 1.0
   ratio = dRel / desired_distance
   return float(np.clip((MARGIN_ACCEL_GATE_FULL - ratio) / (MARGIN_ACCEL_GATE_FULL - MARGIN_ACCEL_GATE_NONE), 0.0, 1.0))
+
+
+def ttc_accel_weight(dRel, v_ego, v_lead):
+  closing = v_ego - v_lead
+  if closing <= 0.1:
+    # 벌어지고 있거나 등속 -- TTC 축만 보면 위험 요소 없음(완전 감쇠 방향).
+    # 최종 weight는 margin_accel_weight와 min()으로 합쳐지므로, 거리 여유가 없는
+    # 근접 상황에서는 ratio 게이트가 이미 weight=1을 유지해 안전 반응은 그대로 통과한다.
+    return 0.0
+  ttc = dRel / closing
+  return float(np.clip((LEAD_ACCEL_TTC_GATE_FULL - ttc) / (LEAD_ACCEL_TTC_GATE_FULL - LEAD_ACCEL_TTC_GATE_NONE), 0.0, 1.0))
 
 
 # --- Lead-acquisition proactive deceleration ramp (2026-08-17 실주행 로그 대응) ---
@@ -508,11 +536,16 @@ class LongitudinalMpc:
       a_lead = lead.aLeadK
       a_lead_tau = lead.aLeadTau
 
-      # margin-based accel damping: with enough following-distance margin, ignore
-      # lead accel/decel jitter and hold steady; response ramps back to full as
-      # margin shrinks toward the safety threshold. self.desired_distance is the
-      # previous cycle's value (one 0.05s-old sample) -- negligible staleness.
-      a_lead *= margin_accel_weight(x_lead, self.desired_distance)
+      # margin-based accel damping: with enough following-distance margin AND
+      # enough TTC margin, ignore lead accel/decel jitter and hold steady;
+      # response ramps back to full as either margin shrinks toward its
+      # respective safety threshold (min() of the two -- distance ratio alone
+      # under-damps at highway speed since desired_distance itself grows with
+      # v_ego, see LEAD_ACCEL_TTC_GATE_* comment above). self.desired_distance
+      # is the previous cycle's value (one 0.05s-old sample) -- negligible staleness.
+      dist_w = margin_accel_weight(x_lead, self.desired_distance)
+      ttc_w = ttc_accel_weight(x_lead, v_ego, v_lead)
+      a_lead *= min(dist_w, ttc_w)
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0
