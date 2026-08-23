@@ -566,7 +566,7 @@ class LongitudinalMpc:
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     return lead_xv
   
-  def process_lead(self, lead, j_lead):
+  def process_lead(self, lead, j_lead, vision_dRel_rate=None):
     v_ego = self.x0[1]
 
     # launch bypass state update (FINDINGS.md 45차) -- 정차->출발 감지는 리드 유무와
@@ -581,6 +581,21 @@ class LongitudinalMpc:
       v_lead = lead.vLead
       a_lead = lead.aLeadK
       a_lead_tau = lead.aLeadTau
+
+      # 58차 1번: "카메라 인식 감속이 레이더 대비 약함" 개선. vision_dRel_rate는
+      # long_mpc가 25/26차부터 독립적으로 계산해온 실측 dRel 미분(레이더가 쓰는
+      # 것과 동일한 방식, VISION_CLOSING_RATE_MIN_TIME 이상 연속추적 후에만
+      # 신뢰) -- 지금까지는 frac_rate로 MPC obstacle-distance의 하한(floor)만
+      # 조이는 데 썼고, MPC가 실제 lead 궤적을 extrapolate하는 v_lead 자체는
+      # vision 원본(lead.vLead, 원거리에서 과소평가 경향 확인됨)을 그대로
+      # 썼음. 여기서도 반영해 vision-only 상황의 감속 반응을 레이더 락온 시
+      # 수준에 가깝게 강화한다. 안전측(더 빠른 접근 쪽)으로만 보정하며 절대
+      # 완화하지 않음 -- v_lead를 낮추는(closing을 더 크게 보는) 방향일 때만
+      # 적용.
+      if (not lead.radar) and vision_dRel_rate is not None:
+        measured_v_lead = v_ego + vision_dRel_rate
+        if measured_v_lead < v_lead:
+          v_lead = measured_v_lead
 
       # margin-based accel damping: with enough following-distance margin AND
       # enough TTC margin, ignore lead accel/decel jitter and hold steady;
@@ -744,7 +759,13 @@ class LongitudinalMpc:
     else:
       self.j_lead = 0.0
 
-    lead_xv_0, lead_v_0 = self.process_lead(radarstate.leadOne, np.clip(self.j_lead * carrot.j_lead_factor, -1.0, 1.0))
+    # 58차 1번: process_lead에 넘길 vision_dRel_rate는 leadOne에 대해서만
+    # 의미가 있음(_vision_dRel_rate 자체가 leadOne 기준으로만 부기됨, 위
+    # "vision-only closing-rate cross-check bookkeeping" 참고) -- leadTwo에는
+    # None으로 전달해 보정 없이 기존 동작 유지.
+    vision_rate_for_lead0 = self._vision_dRel_rate if self._lead_acq_timer >= VISION_CLOSING_RATE_MIN_TIME else None
+    lead_xv_0, lead_v_0 = self.process_lead(radarstate.leadOne, np.clip(self.j_lead * carrot.j_lead_factor, -1.0, 1.0),
+                                             vision_dRel_rate=vision_rate_for_lead0)
     lead_xv_1, _ = self.process_lead(radarstate.leadTwo, 0.0)
 
     mode = self.mode
