@@ -820,7 +820,14 @@ class RadarD:
     if track is not None:
       lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel)
       radar = True
-    elif (track is None) and ready and (lead_msg.prob > .5):
+    # 58차 3번 (A 후속수정): 기존엔 여기서 lead_msg.prob>.5를 별도로 다시
+    # 체크해서, VisionTrack.update()의 tentative 조기등록(A)이 내부적으로
+    # status=True가 돼도 이 바깥 게이트에 막혀 radarState.leadOne엔 전혀
+    # 반영이 안 되던 버그(A 무력화) 발견. vision_tracks[index]는 이 함수
+    # 호출 전에 이미 update()가 끝난 상태(같은 tick)이므로, 중복 체크 대신
+    # 그 결과(status)를 그대로 신뢰한다 -- prob>.5 정식경로와 A 조기등록
+    # 경로 둘 다 자연스럽게 커버됨.
+    elif (track is None) and ready and self.vision_tracks[index].status:
         lead_dict = self.vision_tracks[index].get_lead(md)
 
     if self.enable_corner_radar > 1:
