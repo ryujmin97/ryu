@@ -386,24 +386,6 @@ def get_RadarState_from_vision(md, lead_msg: capnp._DynamicStructReader, v_ego: 
 VISION_TRACK_PROB_GATE = 0.70   # 기존 0.97 -- 실측 원거리 prob 분포에 맞춤
 VISION_TRACK_CNT_GATE  = 10     # 기존 20(=1.0s) -- 0.5s(20Hz 기준)로 단축
 
-# 58차 3번 (A): 정식 등록 문턱(prob>.5)을 못 넘어도, prob가 "애매한 구간"
-# (TENTATIVE_PROB_GATE~정식문턱)에서 같은 위치(dRel)로 여러 프레임 연속
-# 잡히면(=노이즈성 순간 오탐지가 아니라 진짜 물체) 조기 등록을 허용한다.
-# "정지차량_미인식" 실사례(8초간 화면에 명백히 보이는데 prob<0.5라 트랙
-# 자체가 안 생겼던 문제)의 근본 대응. dRel 튐 감시로 다른 물체로의 오인
-# 승격은 차단.
-VISION_TRACK_TENTATIVE_PROB_GATE = 0.35    # 이 이상이면 tentative 카운트 시작
-VISION_TRACK_TENTATIVE_CNT_GATE  = 10      # 0.5s(20Hz) 연속 유지 시 정식 등록으로 승격
-VISION_TRACK_TENTATIVE_DREL_JITTER = 8.0   # tentative 추적 중 dRel이 이 이상 튀면 다른 물체로 판단, 리셋
-
-# 58차 3번 (B): prob<VISION_TRACK_PROB_GATE라 아직 모델예측(lead_v_rel_pred)만
-# 쓰는 구간에서도, dRel 실측 이력이 최소 SAFETY_MIN_CNT프레임 쌓였으면 그
-# 실측 기반 속도가 모델예측보다 "더 위험"(접근이 더 빠름=vLead가 더 작음)할
-# 때만 min()으로 안전측 보정한다. 모델이 정상(과소평가 아님)일 땐 절대 개입
-# 안 함 -- 58차1번에서 이미 검증된 "min() 안전클램프만, 완화 방향 없음" 원칙
-# 그대로 재사용.
-VISION_TRACK_SAFETY_MIN_CNT = 2
-
 class VisionTrack:
   def __init__(self, radar_ts):
     self.radar_ts = radar_ts
@@ -429,10 +411,6 @@ class VisionTrack:
     self.cnt = 0
 
     self.dPath = 0.0
-
-    # 58차 3번 (A): tentative(예비) 등록 추적용
-    self.tentative_cnt = 0
-    self.tentative_dRel_last = 0.0
 
   def get_lead(self, md):
     #aLeadK = 0.0 if self.mixRadarInfo in [3] else clip(self.aLeadK, self.aLead - 1.0, self.aLead + 1.0)
@@ -471,24 +449,8 @@ class VisionTrack:
     lead_v_rel_pred = lead_msg.v[0] - model_v_ego
     self.prob = lead_msg.prob
     self.v_ego = v_ego
-
-    # 58차 3번 (A): 정식 등록 문턱(prob>.5) 못 넘는 "애매한" prob에서도,
-    # 같은 위치의 물체가 여러 프레임 연속 잡히면 tentative_cnt를 쌓아
-    # 문턱 전에 조기 등록을 허용한다. 다른 물체로 튀면(jitter 초과)
-    # tentative_cnt를 리셋해 오인 승격을 막는다.
-    dRel_candidate = float(lead_msg.x[0]) - RADAR_TO_CAMERA
-    if VISION_TRACK_TENTATIVE_PROB_GATE <= self.prob <= 0.5:
-      if self.tentative_cnt > 0 and abs(dRel_candidate - self.tentative_dRel_last) > VISION_TRACK_TENTATIVE_DREL_JITTER:
-        self.tentative_cnt = 0
-      self.tentative_cnt += 1
-      self.tentative_dRel_last = dRel_candidate
-    elif self.prob < VISION_TRACK_TENTATIVE_PROB_GATE:
-      self.tentative_cnt = 0
-
-    register_ok = (self.prob > .5) or (self.tentative_cnt >= VISION_TRACK_TENTATIVE_CNT_GATE)
-
-    if register_ok:
-      dRel = dRel_candidate
+    if self.prob > .5:
+      dRel = float(lead_msg.x[0]) - RADAR_TO_CAMERA
       if abs(self.dRel - dRel) > 5.0:
         self.cnt = 0
       self.dRel = dRel
@@ -503,17 +465,6 @@ class VisionTrack:
         self.vLead = float(v_ego + lead_v_rel_pred)
         self.aLead = a_lead_vision
         self.vLat = 0.0
-        # 58차 3번 (B): 아직 모델예측만 쓰는 구간이라도, dRel 실측 이력이
-        # 충분히 쌓였으면(SAFETY_MIN_CNT+) 실측 기반 속도가 모델예측보다
-        # 더 위험(접근이 더 빠름)할 때만 min()으로 안전측 보정한다.
-        # 모델이 실제로 맞을 땐(과소평가 아닐 땐) 전혀 개입하지 않음 --
-        # 58차1번의 v_lead 안전클램프와 동일 원칙, 완화 방향 없음.
-        if self.cnt >= VISION_TRACK_SAFETY_MIN_CNT and self.dRel_last > 0.0 and self.radar_ts > 0:
-          v_rel_measured = (self.dRel - self.dRel_last) / self.radar_ts
-          vLead_measured = float(v_ego + v_rel_measured)
-          if vLead_measured < self.vLead:
-            self.vLead = vLead_measured
-            self.vRel = v_rel_measured
       else:
         v_rel = (self.dRel - self.dRel_last) / self.radar_ts
         v_rel = self.vRel * (1. - self.alpha) + v_rel * self.alpha
@@ -820,14 +771,7 @@ class RadarD:
     if track is not None:
       lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel)
       radar = True
-    # 58차 3번 (A 후속수정): 기존엔 여기서 lead_msg.prob>.5를 별도로 다시
-    # 체크해서, VisionTrack.update()의 tentative 조기등록(A)이 내부적으로
-    # status=True가 돼도 이 바깥 게이트에 막혀 radarState.leadOne엔 전혀
-    # 반영이 안 되던 버그(A 무력화) 발견. vision_tracks[index]는 이 함수
-    # 호출 전에 이미 update()가 끝난 상태(같은 tick)이므로, 중복 체크 대신
-    # 그 결과(status)를 그대로 신뢰한다 -- prob>.5 정식경로와 A 조기등록
-    # 경로 둘 다 자연스럽게 커버됨.
-    elif (track is None) and ready and self.vision_tracks[index].status:
+    elif (track is None) and ready and (lead_msg.prob > .5):
         lead_dict = self.vision_tracks[index].get_lead(md)
 
     if self.enable_corner_radar > 1:
