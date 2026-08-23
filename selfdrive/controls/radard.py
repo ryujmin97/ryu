@@ -369,6 +369,23 @@ def get_RadarState_from_vision(md, lead_msg: capnp._DynamicStructReader, v_ego: 
     "radarTrackId": -1,
   }
 
+# --- VisionTrack measured-derivative gate tuning (58차 1번) ---
+# VisionTrack.update()의 vRel 추정은 두 경로 중 하나를 씀:
+#   (a) 단일 프레임 모델 예측(lead_v_rel_pred) -- 노이즈에 약하고 원거리에서
+#       접근율을 과소평가하는 경향(userMemories/FINDINGS 다수 세션에서 확인된
+#       "카메라 인식 시 미감속"의 root cause)
+#   (b) 실측 dRel 미분값(v_rel = (dRel-dRel_last)/dt, alpha 저역통과) -- 레이더가
+#       쓰는 것과 동일한 방식, 훨씬 정확하지만 dRel 자체가 튀면 노이즈에 노출됨
+# 기존 게이트(prob<0.97 또는 cnt<20이면 (a)만 사용)가 문제였음: 실제 주행
+# 로그에서 원거리 vision lead의 prob는 0.5~0.8대가 흔하고 0.97을 넘는 경우가
+# 드물어 (b) 경로가 사실상 죽어있었음(56차/57차 qcamera 대조로 반복 확인된
+# "vision 미감속" 패턴의 근본원인). 게이트를 완화해 (b)를 훨씬 자주 타게 하고,
+# model_weight 보간 구간도 낮춘 게이트값에 맞춰 재설계 -- prob가 게이트값
+# 근처일 땐 아직 모델쪽 비중을 높게(안전측) 유지하고 prob==1.0에 가까워질수록
+# 실측값 비중을 거의 100%로 올리는 점진적 전환은 유지한다(급전환 방지).
+VISION_TRACK_PROB_GATE = 0.70   # 기존 0.97 -- 실측 원거리 prob 분포에 맞춤
+VISION_TRACK_CNT_GATE  = 10     # 기존 20(=1.0s) -- 0.5s(20Hz 기준)로 단축
+
 class VisionTrack:
   def __init__(self, radar_ts):
     self.radar_ts = radar_ts
@@ -441,7 +458,9 @@ class VisionTrack:
       self.yRel = float(-lead_msg.y[0])
       dPath = self.yRel + np.interp(self.dRel, md.position.x, md.position.y)
       a_lead_vision = lead_msg.a[0]
-      if self.cnt < 20 or self.prob < 0.97: # 레이더측정시 cnt는 0, 레이더사라지고 1초간 비젼데이터 그대로 사용
+      # 58차 1번: 게이트를 0.97/20 -> VISION_TRACK_PROB_GATE/VISION_TRACK_CNT_GATE로 완화.
+      # (레이더측정시 cnt는 0, 레이더사라지고 cnt<GATE인 동안엔 비젼데이터 그대로 사용)
+      if self.cnt < VISION_TRACK_CNT_GATE or self.prob < VISION_TRACK_PROB_GATE:
         self.vRel = lead_v_rel_pred
         self.vLead = float(v_ego + lead_v_rel_pred)
         self.aLead = a_lead_vision
@@ -451,7 +470,9 @@ class VisionTrack:
         v_rel = self.vRel * (1. - self.alpha) + v_rel * self.alpha
 
         #self.vRel = lead_v_rel_pred if self.mixRadarInfo == 3 else (lead_v_rel_pred + self.vRel) / 2
-        model_weight = np.interp(self.prob, [0.97, 1.0], [0.4, 0.0])  # prob가 높으면 v_rel(dRel미분값)에 가중치를 줌.
+        # prob==GATE 근처(막 진입)일 땐 아직 모델 비중 높게(0.5, 안전측), prob->1.0으로
+        # 갈수록 실측 dRel미분(v_rel)에 거의 전적으로 의존(0.0)하도록 점진 전환.
+        model_weight = np.interp(self.prob, [VISION_TRACK_PROB_GATE, 1.0], [0.5, 0.0])  # prob가 높으면 v_rel(dRel미분값)에 가중치를 줌.
         self.vRel = float(lead_v_rel_pred * model_weight + v_rel * (1. - model_weight))
         #self.vRel = (lead_v_rel_pred + v_rel) / 2
         self.vLead = float(v_ego + self.vRel)
