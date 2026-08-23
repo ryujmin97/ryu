@@ -166,6 +166,29 @@ LAUNCH_BYPASS_STOP_V_EGO = 0.3   # m/s : 이하이면 "정차"로 판정(bypass 
 LAUNCH_BYPASS_EXIT_V_EGO = 5.0   # m/s : 정차에서 출발한 뒤 이 속도를 넘으면 38차 로직으로 복귀
 
 
+# 2026-08-23 실주행 대응 ("정체구간 붕끗" 이슈, FINDINGS.md 58차 2번 계속3):
+# 저속 구간(정체 등)에서 앞차가 이미 강하게 감속 중인데도 TTC가 아직
+# LEAD_ACCEL_TTC_GATE_NONE(6.0s)을 넘지 않아 ttc_accel_weight()가 그 감속
+# (aLeadK)을 계속 감쇠하다가, TTC가 뒤늦게 문턱을 넘는 순간 그동안 감쇠돼
+# 있던 aLeadK가 1초 이내로 몰려 반영되며 급가속->급감속 반전으로 체감되는
+# 패턴을 실측으로 확인함. route a3a55cb808 seg12 t=4420~4423 실측: min
+# TTC=4.45s로 danger override(LEAD_ACQ_TTC_DANGER=2.5s) 문턱과는 무관,
+# dRel 17~24m대(정체 특유의 초근접 상황도 아님), 앞차는 ego가 여전히
+# 가속 중이던 시점부터 이미 실측 감속 근사치 -1.5~-2.0m/s²대를 유지 중이었음
+# (vLead 수치미분 기준, 노이즈 있으나 추세 뚜렷).
+#
+# 대응: "TTC 문턱을 넘을 때까지 기다렸다가 몰아서 반영" 대신, 저속 구간
+# (LOW_SPEED_STRONG_DECEL_V_EGO_GATE 이하)에서만 앞차의 실측 감속이 일정
+# 크기(LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH)보다 강하면 TTC 위치와 무관하게
+# danger override와 동일하게 즉시 무감쇠(rise-rate도 우회)로 반영한다 --
+# 감쇠 누적 자체를 없애 "몰아서 터지는" 상황을 애초에 방지하는 방향.
+# **핵심 제약(사용자 요구)**: 저속 게이트 밖(v_ego > 게이트값, 일반/고속
+# 주행)에서는 이 분기 자체를 안 타므로 patch 이전과 동작이 100% 동일해야
+# 한다 -- 회귀 검증 시 v_ego > 게이트값 시나리오는 diff 0을 기준으로 확인.
+LOW_SPEED_STRONG_DECEL_V_EGO_GATE = 30.0 / 3.6   # m/s (~30km/h) : 이 속도 이하에서만 적용
+LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH = -1.8      # m/s^2 : 앞차 실측 감속이 이보다 강하면(더 음수) 적용
+
+
 def ttc_accel_weight(dRel, v_ego, v_lead):
   closing = v_ego - v_lead
   if closing <= 0.1:
@@ -616,10 +639,19 @@ class LongitudinalMpc:
       w = min(dist_w, ttc_w)
       closing = v_ego - v_lead
       ttc_now = x_lead / closing if closing > 0.1 else float('inf')
-      if ttc_now <= LEAD_ACQ_TTC_DANGER:
-        # 실제 위험(TTC<=2.5s, radard LeadBlend danger_hold와 동일 임계값)이면
-        # rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을 늦추지 않는다. launch bypass
-        # 여부와 무관하게 항상 최우선.
+      # 58차 2번: 저속 구간 한정, 앞차가 이미 강하게 감속 중이면 TTC 문턱 도달
+      # 여부와 무관하게 danger override와 동일하게 취급 (위 LOW_SPEED_STRONG_DECEL_*
+      # 주석 참고). 이 조건 자체가 v_ego 게이트로 닫혀 있으므로 게이트 밖(고속/
+      # 일반 주행)에서는 아래 두 분기 중 하나도 True가 될 수 없어 기존 동작과
+      # 동일하다.
+      low_speed_strong_lead_decel = (
+        v_ego <= LOW_SPEED_STRONG_DECEL_V_EGO_GATE
+        and a_lead <= LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH
+      )
+      if ttc_now <= LEAD_ACQ_TTC_DANGER or low_speed_strong_lead_decel:
+        # 실제 위험(TTC<=2.5s, radard LeadBlend danger_hold와 동일 임계값) 또는
+        # 저속+앞차 강한감속이면 rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을
+        # 늦추지 않는다. launch bypass 여부와 무관하게 항상 최우선.
         w = 1.0
       elif self._launch_bypass_active:
         # bypass 중엔 39차 rise-rate 제한도 함께 우회 -- 이 제한은 저속에서 TTC가
