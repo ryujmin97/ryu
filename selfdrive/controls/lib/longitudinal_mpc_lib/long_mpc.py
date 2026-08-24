@@ -323,6 +323,40 @@ VISION_CLOSING_RATE_MAX_PLAUSIBLE = 30.0  # m/s : 이보다 빠른(음의) 순�
 VISION_CLOSING_RATE_MEDIAN_WINDOW = 3     # 프레임 : 최근 N개 클램프된 raw_rate의 중앙값을 필터 입력으로 사용
                                            #          (DT_MDL=0.05s 기준 최대 0.1s 지연 추가, 곡선 노이즈 스냅 억제용)
 
+# --- 방안 E: 참고 closing rate(leadVLead) 기반 상대적 타당성 클램프 ---
+# (2026-08-24, 63차 계속9 설계 / 63차 계속10 재생검증+정정으로 확정)
+#
+# 배경: cut-in(끼어들기) 상황에서 트랙이 기존 리드 -> 새로 끼어든 차량으로
+# 전환되는 순간, raw dRel 미분(raw_rate)이 물리적으로 불가능한 크기
+# (-100~-339m/s급)로 튀는 사례 확인(seg3/seg14). 위 절대값 클램프
+# (VISION_CLOSING_RATE_MAX_PLAUSIBLE=30.0)만으로는 이런 트랙전환성 점프를
+# 다 못 거름 -- 30m/s 자체가 이미 상당히 넉넉한 상한이라, 그보다 작지만
+# 여전히 비현실적인 값(예: -25m/s)은 통과함.
+#
+# 방안: raw_rate 클램프 하한에 "모델이 이미 추정한 상대속도"(lead.vLead)
+# 기반 참고 closing rate를 추가한다. leadVLead는 raw dRel 프레임간 미분보다
+# 훨씬 안정적인 신호(63차 계속9 실측: raw_rate -235~-6m/s vs vEgo-vLead
+# 기반 참고치 -0.5~-3.2m/s)이므로, 이 참고치에서 너무 크게 벗어나는(즉
+# 참고치보다 훨씬 더 접근중이라고 말하는) raw_rate는 신뢰하지 않는다.
+#
+# ref_rate = -(v_ego - lead.vLead)          # 모델 기반 참고 closing rate
+# plausible_min = ref_rate - VISION_RATE_REF_MARGIN
+# raw_rate_clamped = max(raw_rate, -VISION_CLOSING_RATE_MAX_PLAUSIBLE, plausible_min)
+#
+# 안전 성질(63차 계속10 재확인): leadVLead가 실제 위험(빠른 접근)을 정확히
+# 가리키는 경우엔 ref_rate도 함께 크게 음수가 돼 plausible_min도 충분히
+# 낮아지므로 raw_rate를 거의 그대로 통과시킴 -- 즉 이 클램프는 leadVLead가
+# "안전하다"(접근 아님/느린 접근)고 말할 때만 raw dRel의 과도한 튐을
+# 억제하는 구조. leadVLead도 위험을 인지하는 진짜 급접근까지 억제하는
+# 방향은 아니며, DANGER override(TTC<=2.5s) 경로는 이 클램프와 완전히
+# 무관하게 항상 그대로 유지된다.
+#
+# 검증 이력: 63차 계속9 로직단위 재생(seg14, 완만한 계단식 포화 -> 램프로
+# 개선), 63차 계속10 재생검증(seg3, 진짜 cutin에서 leadVLead가 실제로도
+# 안전(opening 직전)했음을 레이더 락온 후 vRel 실측(+3.2~+7m/s)으로 확인
+# -- PATCHED_E의 억제가 오탐 억제가 아니라 정탐이었음이 사후 확정됨).
+VISION_RATE_REF_MARGIN = 5.0              # m/s : ref_rate 대비 이만큼까지만 raw_rate가 더 낮을(더 접근할) 수 있다고 인정
+
 # --- Vision-only closing-rate 절대값 게이트 (2026-08-21, 25차) ---
 # 증상: 25차 실주행 화면녹화 영상 판독 결과, 원거리(dRel 85~120m)에서
 # closing rate가 5m/s 안팎으로 뚜렷이 존재하는데도 TTC(=dRel/rate, 이
@@ -821,7 +855,13 @@ class LongitudinalMpc:
         # 곡선 노이즈 스냅 클램프 (VISION_CLOSING_RATE_MAX_PLAUSIBLE 위 주석 참고) --
         # 접근 방향(음수)만 클램프한다. 멀어지는 방향(양수) 스냅은 급브레이크
         # 유발 리스크가 없으므로 그대로 둔다.
-        raw_rate_clamped = max(raw_rate, -VISION_CLOSING_RATE_MAX_PLAUSIBLE)
+        #
+        # 방안 E (VISION_RATE_REF_MARGIN 위 주석 참고, 63차 계속9/10): 절대값
+        # 클램프만으론 트랙전환성 점프(cut-in 등)를 다 못 거르므로, leadVLead
+        # 기반 참고 closing rate 대비 상대적 타당성 클램프를 추가로 적용한다.
+        ref_rate = -(v_ego - float(radarstate.leadOne.vLead))
+        plausible_min = ref_rate - VISION_RATE_REF_MARGIN
+        raw_rate_clamped = max(raw_rate, -VISION_CLOSING_RATE_MAX_PLAUSIBLE, plausible_min)
         self._vision_dRel_rate_window.append(raw_rate_clamped)
         # 중앙값을 필터 입력으로 사용 -- 한두 프레임짜리 스냅-복귀는 윈도우 내
         # 다수결에 밀려 걸러지고, 지속적인 접근은 중앙값에도 그대로 반영된다.
