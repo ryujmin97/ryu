@@ -386,6 +386,27 @@ def get_RadarState_from_vision(md, lead_msg: capnp._DynamicStructReader, v_ego: 
 VISION_TRACK_PROB_GATE = 0.70   # 기존 0.97 -- 실측 원거리 prob 분포에 맞춤
 VISION_TRACK_CNT_GATE  = 10     # 기존 20(=1.0s) -- 0.5s(20Hz 기준)로 단축
 
+# 60차: A(tentative 조기등록) 재설계. 58차3번(A+B) 원안은 정지앞차 미인식
+# 실사례(8초간 화면에 명백히 보이는데 prob<0.5라 트랙 자체가 안 생겼던 문제)를
+# 겨냥해 prob 0.35~0.5 구간에서 여러 프레임 연속 잡히면 조기 등록을 허용했으나,
+# 실주행 체감 오탐/불필요감속으로 롤백됨(58차3번+후속수정 REVERTED, FINDINGS.md
+# 참고). 롤백 사유가 A(조기등록)와 B(저확신구간 안전측 보정) 중 어느 쪽인지는
+# 확정되지 않았음 -- 이번엔 B는 제외하고 A만, 안전장치를 보강해 재시도한다.
+#   1. dRel jitter(8m) 게이트만으론 다른 물체(특히 옆차선 차량)를 못 걸렀을
+#      가능성 -- dRel은 유사해도 dPath(차선 대비 좌우 위치)는 뚜렷이 다른
+#      경우가 많음(37차 SCC 단일점 폴백과 동일 문제). dPath 안정성 게이트 추가.
+#   2. tentative 판정용 dRel에 경량 중앙값 필터 추가 -- jitter 게이트가 단일
+#      프레임 스냅 노이즈로 오판(불필요한 리셋 또는 잘못된 승격)하는 것 방지.
+#      실제 등록 이후(정식 dRel/vRel 계산)엔 영향 없음, tentative 판정에만 적용.
+VISION_TRACK_TENTATIVE_PROB_GATE   = 0.35  # 이 이상이면 tentative 카운트 시작
+VISION_TRACK_TENTATIVE_CNT_GATE    = 10    # 0.5s(20Hz) 연속 유지 시 정식 등록으로 승격
+VISION_TRACK_TENTATIVE_DREL_JITTER = 8.0   # m, 중앙값필터 후 dRel이 이 이상 튀면 다른 물체로 판단, 리셋
+VISION_TRACK_TENTATIVE_DPATH_JITTER = 1.5  # m, 차선 대비 좌우 위치가 프레임간 이 이상 변하면 다른 물체로 판단, 리셋
+VISION_TRACK_TENTATIVE_DPATH_ABS_GATE = 1.75  # m, |dPath|가 이 이상이면(차로 밖) 애초에 tentative 후보에서 배제
+                                                # (jitter 게이트만으론 "옆차로에서 안정적으로 유지"되는 물체를 못 걸러
+                                                #  절대값 게이트 병행 필요, 37차 SCC_FALLBACK_DPATH_GATE=2.0m와 동일 원리)
+VISION_TRACK_TENTATIVE_MEDIAN_WINDOW = 3   # 프레임, tentative dRel 판정 전용 경량 중앙값 필터 윈도우
+
 class VisionTrack:
   def __init__(self, radar_ts):
     self.radar_ts = radar_ts
@@ -411,6 +432,12 @@ class VisionTrack:
     self.cnt = 0
 
     self.dPath = 0.0
+
+    # 60차: tentative(예비) 등록 추적용
+    self.tentative_cnt = 0
+    self.tentative_dRel_last = 0.0
+    self.tentative_dPath_last = 0.0
+    self.tentative_dRel_hist: deque[float] = deque(maxlen=VISION_TRACK_TENTATIVE_MEDIAN_WINDOW)
 
   def get_lead(self, md):
     #aLeadK = 0.0 if self.mixRadarInfo in [3] else clip(self.aLeadK, self.aLead - 1.0, self.aLead + 1.0)
@@ -449,8 +476,44 @@ class VisionTrack:
     lead_v_rel_pred = lead_msg.v[0] - model_v_ego
     self.prob = lead_msg.prob
     self.v_ego = v_ego
-    if self.prob > .5:
-      dRel = float(lead_msg.x[0]) - RADAR_TO_CAMERA
+
+    # 60차: A(tentative 조기등록). 정식 등록 문턱(prob>.5) 못 넘는 "애매한"
+    # prob에서도, 같은 물체(dRel + dPath 둘 다 안정)가 여러 프레임 연속 잡히면
+    # tentative_cnt를 쌓아 문턱 전에 조기 등록을 허용한다. dRel만으론 옆차선
+    # 차량처럼 dRel은 비슷해도 dPath가 다른 경우를 못 걸러 dPath 게이트를
+    # 병행한다. dRel은 경량 중앙값 필터를 거친 값으로 jitter 판정(단일 프레임
+    # 스냅에 의한 오판 방지).
+    dRel_candidate = float(lead_msg.x[0]) - RADAR_TO_CAMERA
+    if VISION_TRACK_TENTATIVE_PROB_GATE <= self.prob <= 0.5:
+      yRel_candidate = float(-lead_msg.y[0])
+      self.tentative_dRel_hist.append(dRel_candidate)
+      dRel_filtered = float(np.median(self.tentative_dRel_hist))
+      dPath_candidate = yRel_candidate + np.interp(dRel_filtered, md.position.x, md.position.y)
+      if abs(dPath_candidate) > VISION_TRACK_TENTATIVE_DPATH_ABS_GATE:
+        # 차로 밖(옆차로 등) 물체로 판단 -- 절대값 게이트, jitter 게이트와
+        # 달리 "안정적으로 유지되는" 옆차로 물체도 여기서 원천 배제됨.
+        self.tentative_cnt = 0
+        self.tentative_dRel_hist.clear()
+      else:
+        if self.tentative_cnt > 0 and (
+          abs(dRel_filtered - self.tentative_dRel_last) > VISION_TRACK_TENTATIVE_DREL_JITTER or
+          abs(dPath_candidate - self.tentative_dPath_last) > VISION_TRACK_TENTATIVE_DPATH_JITTER
+        ):
+          self.tentative_cnt = 0
+          self.tentative_dRel_hist.clear()
+          self.tentative_dRel_hist.append(dRel_candidate)
+          dRel_filtered = dRel_candidate
+        self.tentative_cnt += 1
+        self.tentative_dRel_last = dRel_filtered
+        self.tentative_dPath_last = dPath_candidate
+    elif self.prob < VISION_TRACK_TENTATIVE_PROB_GATE:
+      self.tentative_cnt = 0
+      self.tentative_dRel_hist.clear()
+
+    register_ok = (self.prob > .5) or (self.tentative_cnt >= VISION_TRACK_TENTATIVE_CNT_GATE)
+
+    if register_ok:
+      dRel = dRel_candidate
       if abs(self.dRel - dRel) > 5.0:
         self.cnt = 0
       self.dRel = dRel
