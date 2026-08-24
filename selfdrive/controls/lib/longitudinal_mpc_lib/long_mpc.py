@@ -359,6 +359,25 @@ NEW_LEAD_VLEAD_CORRECTION_SUPPRESS_S = 1.5  # s : 리드 신규등록 후 이 �
 LANE_CHANGE_VLEAD_CORRECTION_HOLD_S = 1.0   # s : 차선변경(blinker) 종료 후
                                              # 이 시간 더 유예 유지(잔여 흔들림 대비)
 
+# 61차 계속(2026-08-24, 방안 C): cutin 급감속 2건(r1-3/r1-14) 재발견 --
+# 위 신규등록 게이트(NEW_LEAD_VLEAD_CORRECTION_SUPPRESS_S)만으로는 못 잡는
+# 별개 패턴: 자차로로 측면 진입(cutin)하는 순간, vision dRel의 프레임간
+# 미분값이 "종방향으로 급접근중"이라는 착시 신호를 만들어냄(실제로는 옆
+# 차로에서 들어오며 dRel이 기하학적으로 뚝 떨어지는 것뿐) -- 레이더가
+# 나중에 락온해서야 실제 vRel(오히려 이탈 중)이 드러남. 이미 등록된
+# (신규등록 게이트 유예기간을 지난) 리드에서도 발생할 수 있으므로 별도
+# 감지가 필요.
+# 대응: 최근 DREL_DISCONTINUITY_WINDOW_N 프레임 내 dRel이 DREL_DISCONTINUITY_
+# DROP_THRESH 이상 불연속 급락하면 "타겟 전환/측면진입 의심"으로 보고,
+# 기존에 이미 검증된 신규등록 suppress 메커니즘을 그대로 재사용한다
+# (_lead_acq_timer를 리셋 -- 새 코드경로 추가 없이 위 NEW_LEAD_VLEAD_
+# CORRECTION_SUPPRESS_S 유예가 자동으로 이어서 적용됨). TTC danger
+# override(실제 위험, TTC<=LEAD_ACQ_TTC_DANGER)는 이 리셋과 무관하게
+# process_lead()에서 항상 그대로 작동(안전 백스톱 유지, 위 617번째줄대
+# 부근 참고).
+DREL_DISCONTINUITY_DROP_THRESH = 15.0   # m : 이 이상 급락하면 급락으로 판정
+DREL_DISCONTINUITY_WINDOW_N = 5         # 최근 5프레임(~0.25s @ 20Hz) 내 기준
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -521,6 +540,11 @@ class LongitudinalMpc:
     self._vision_dRel_rate = 0.0         # 저역통과 필터링된 dRel 변화율(m/s), 음수=접근중
     self._vision_dRel_rate_window = collections.deque(maxlen=VISION_CLOSING_RATE_MEDIAN_WINDOW)
                                           # 클램프된 raw_rate 최근 N프레임 (중앙값 필터용, 곡선 노이즈 스냅 억제)
+
+    # 61차 계속(방안 C): cutin 불연속 급락 감지용 raw dRel 이력(위
+    # DREL_DISCONTINUITY_* 주석 참고) -- rate가 아니라 원본 dRel 값 자체를
+    # 담아 윈도우 양끝 차이로 급락 여부를 판정한다.
+    self._dRel_raw_history = collections.deque(maxlen=DREL_DISCONTINUITY_WINDOW_N)
 
     # 60차 계속: 58차1 v_lead 직접보정 유예 상태(차선변경 hold 타이머) --
     # blinker가 꺼진 뒤에도 LANE_CHANGE_VLEAD_CORRECTION_HOLD_S만큼 유예 유지
@@ -750,6 +774,7 @@ class LongitudinalMpc:
         self._vision_dRel_prev = None
         self._vision_dRel_rate = 0.0
         self._vision_dRel_rate_window.clear()
+        self._dRel_raw_history.clear()
       # else: within grace -- freeze state as-is, don't reset. If the lead
       # reappears next cycle, an already-started ramp just keeps going from
       # where it left off instead of restarting.
@@ -775,6 +800,22 @@ class LongitudinalMpc:
     # because those 6 events happened to have unbroken leadStatus runs.
     if lead_one_status_now and not radarstate.leadOne.radar:
       dRel_now = float(radarstate.leadOne.dRel)
+
+      # 61차 계속(방안 C): cutin 불연속 급락 감지 -- rate 계산/필터와는
+      # 별개로, 원본 dRel 값 자체의 최근 윈도우 양끝 차이를 본다(위
+      # DREL_DISCONTINUITY_* 주석 참고). rate/중앙값 필터는 "지속적인
+      # 접근"과 "일회성 스냅"을 구분하는 게 목적이라 이 급락 자체를
+      # 완만하게 흡수해버릴 수 있어, 원본 값으로 별도 판정한다.
+      self._dRel_raw_history.append(dRel_now)
+      if (len(self._dRel_raw_history) == self._dRel_raw_history.maxlen and
+          (self._dRel_raw_history[-1] - self._dRel_raw_history[0]) < -DREL_DISCONTINUITY_DROP_THRESH):
+        # 측면진입(cutin)/타겟 전환 의심 -- 기존에 이미 검증된 신규등록
+        # suppress 메커니즘을 재사용(새 코드경로 추가 없음). 이 프레임부터
+        # NEW_LEAD_VLEAD_CORRECTION_SUPPRESS_S 동안 v_lead 직접보정/frac_rate
+        # 등이 자동으로 유예된다. TTC danger override(process_lead 내
+        # ttc_now<=LEAD_ACQ_TTC_DANGER)는 이 리셋과 무관하게 항상 그대로 작동.
+        self._lead_acq_timer = 0.0
+
       if self._vision_dRel_prev is not None:
         raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
         # 곡선 노이즈 스냅 클램프 (VISION_CLOSING_RATE_MAX_PLAUSIBLE 위 주석 참고) --
@@ -793,11 +834,13 @@ class LongitudinalMpc:
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
       self._vision_dRel_rate_window.clear()
+      self._dRel_raw_history.clear()
     elif self._lead_absent_timer > LEAD_ACQ_LOSS_GRACE_TIME:
       # lead genuinely gone (grace exceeded) -- reset for a fresh start next time.
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
       self._vision_dRel_rate_window.clear()
+      self._dRel_raw_history.clear()
     # else: brief status blip within grace -- freeze dRel_prev/rate as-is.
     # If the lead reappears next cycle with radar still unlocked, the rate
     # estimate resumes accumulating instead of restarting from zero. Note
