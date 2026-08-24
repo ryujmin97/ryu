@@ -843,7 +843,17 @@ class RadarD:
     if track is not None:
       lead_dict = track.get_RadarState(lead_msg.prob, self.vision_tracks[0].yRel)
       radar = True
-    elif (track is None) and ready and (lead_msg.prob > .5):
+    elif (track is None) and ready and self.vision_tracks[index].status:
+        # 60차 계속8: 이 바깥 게이트가 lead_msg.prob를 VisionTrack 내부와
+        # 별개로 독립 재체크하면, VisionTrack.update() 안에서 60차 A(tentative
+        # 조기등록)로 status가 먼저 True가 돼도 여기서 다시 막혀 최종 출력
+        # (radarState.leadOne)엔 전혀 반영 안 됨 -- 58차3번 후속수정
+        # (`1145aea`)이 원래 고쳤던 것과 동일한 버그. 58차3번 전체 롤백
+        # (`1ac07de`, radard.py 58차2번 시점 원복) 때 이 수정도 같이
+        # 사라졌고, 60차 A가 tentative 로직을 새로 짜면서 재반영을 빠뜨림.
+        # self.vision_tracks[index].status는 같은 tick에 update()가 이미
+        # 끝난 최신 상태(정식경로 prob>.5 + tentative 조기등록 둘 다 자연히
+        # 포함)라 여기서 다시 prob를 체크할 필요가 없음.
         lead_dict = self.vision_tracks[index].get_lead(md)
 
     if self.enable_corner_radar > 1:
