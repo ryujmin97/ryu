@@ -342,6 +342,23 @@ VISION_CLOSING_RATE_MEDIAN_WINDOW = 3     # 프레임 : 최근 N개 클램프된
 VISION_CLOSING_RATE_GATE_CAUTION = -2.2   # m/s : 이 값 이상(접근 느림)이면 frac_rate=0
 VISION_CLOSING_RATE_GATE_DANGER  = -5.0   # m/s : 이 값 이하(급접근)면 frac_rate=1.0, 그 사이는 선형보간
 
+# 60차 계속 (2026-08-24): cutin/차선변경 3건(--5/--17/--12)에서 vision-only
+# 구간의 다중 프레임 dRel catch-up이 58차1의 v_lead 직접보정
+# (measured_v_lead = v_ego + vision_dRel_rate)을 오염시켜 과잉감속을 유발
+# 한다는 가설(NEEDS_VALIDATION)이 3건 모두에서 재현됨. 58차1 보정 자체는
+# 그대로 두되(정상적인 원거리 지속 접근 상황에서는 유효한 개선), 아래 두
+# "구조적 catch-up 발생 상황"에서만 보정을 일시 유예한다:
+#  1) 리드 신규 등록 직후(cutin류) -- _lead_acq_timer가 짧을 때 dRel이
+#     화면 진입/트랙 매칭 관성으로 급격히 "따라잡히는" 구간
+#  2) 자차 차선변경 조작 중(blinker on, 자동/수동 무관) -- 조향에 연동해
+#     비전 매칭 대상의 dRel 추정이 흔들리는 구간
+# 두 상황 모두 밖(정상 추종)에서는 58차1 보정이 그대로 100% 동일하게
+# 작동 -- 완화가 아니라 취약 구간에서의 "패치 이전 로직 복귀"임에 유의.
+NEW_LEAD_VLEAD_CORRECTION_SUPPRESS_S = 1.5  # s : 리드 신규등록 후 이 시간
+                                             # 동안은 v_lead 직접보정 유예
+LANE_CHANGE_VLEAD_CORRECTION_HOLD_S = 1.0   # s : 차선변경(blinker) 종료 후
+                                             # 이 시간 더 유예 유지(잔여 흔들림 대비)
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -504,6 +521,10 @@ class LongitudinalMpc:
     self._vision_dRel_rate = 0.0         # 저역통과 필터링된 dRel 변화율(m/s), 음수=접근중
     self._vision_dRel_rate_window = collections.deque(maxlen=VISION_CLOSING_RATE_MEDIAN_WINDOW)
                                           # 클램프된 raw_rate 최근 N프레임 (중앙값 필터용, 곡선 노이즈 스냅 억제)
+
+    # 60차 계속: 58차1 v_lead 직접보정 유예 상태(차선변경 hold 타이머) --
+    # blinker가 꺼진 뒤에도 LANE_CHANGE_VLEAD_CORRECTION_HOLD_S만큼 유예 유지
+    self._lane_change_vlead_hold_timer = 0.0
 
     # lead-accel damping weight rise-rate limit state (see LEAD_ACCEL_WEIGHT_RISE_RATE below)
     self._lead_accel_weight_prev = 1.0   # 직전 사이클 weight -- 초기값 1.0(무감쇠)이 안전측 기본값
@@ -696,7 +717,8 @@ class LongitudinalMpc:
     self.cruise_min_a = min_a
     self.max_a = max_a
 
-  def update(self, carrot, reset_state, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
+  def update(self, carrot, reset_state, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard,
+             lane_change_blinker_active=False):
     v_ego = self.x0[1]
     a_ego = self.x0[2]
     t_follow = carrot.get_T_FOLLOW(personality, v_ego, a_ego)
@@ -795,7 +817,21 @@ class LongitudinalMpc:
     # 의미가 있음(_vision_dRel_rate 자체가 leadOne 기준으로만 부기됨, 위
     # "vision-only closing-rate cross-check bookkeeping" 참고) -- leadTwo에는
     # None으로 전달해 보정 없이 기존 동작 유지.
-    vision_rate_for_lead0 = self._vision_dRel_rate if self._lead_acq_timer >= VISION_CLOSING_RATE_MIN_TIME else None
+    # 60차 계속: 아래 두 취약 구간에서는 v_lead 직접보정을 유예(패치 이전
+    # 로직인 lead.vLead 그대로 사용으로 복귀) -- (1) 리드 신규등록 직후
+    # catch-up 구간, (2) 차선변경(blinker) 중 + 종료 후 hold 구간.
+    if lane_change_blinker_active:
+      self._lane_change_vlead_hold_timer = LANE_CHANGE_VLEAD_CORRECTION_HOLD_S
+    else:
+      self._lane_change_vlead_hold_timer = max(0.0, self._lane_change_vlead_hold_timer - self.dt)
+    vlead_correction_suppressed = (
+      self._lead_acq_timer < NEW_LEAD_VLEAD_CORRECTION_SUPPRESS_S or
+      lane_change_blinker_active or
+      self._lane_change_vlead_hold_timer > 0.0
+    )
+    vision_rate_for_lead0 = (self._vision_dRel_rate
+                              if self._lead_acq_timer >= VISION_CLOSING_RATE_MIN_TIME and not vlead_correction_suppressed
+                              else None)
     lead_xv_0, lead_v_0 = self.process_lead(radarstate.leadOne, np.clip(self.j_lead * carrot.j_lead_factor, -1.0, 1.0),
                                              vision_dRel_rate=vision_rate_for_lead0)
     lead_xv_1, _ = self.process_lead(radarstate.leadTwo, 0.0)

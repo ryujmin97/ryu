@@ -208,7 +208,10 @@ class LongitudinalPlanner:
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality, jerk_factor = carrot.jerk_factor_apply, a_change_cost_starting = carrot.aChangeCostStarting)
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(carrot, reset_state, sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
+    # 60차 계속: 58차1 v_lead 직접보정을 차선변경(blinker) 중엔 유예하기 위한 신호 전달
+    lane_change_blinker_active = bool(sm['carState'].leftBlinker or sm['carState'].rightBlinker)
+    self.mpc.update(carrot, reset_state, sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality,
+                     lane_change_blinker_active=lane_change_blinker_active)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
