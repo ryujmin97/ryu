@@ -483,6 +483,16 @@ class VisionTrack:
     # 차량처럼 dRel은 비슷해도 dPath가 다른 경우를 못 걸러 dPath 게이트를
     # 병행한다. dRel은 경량 중앙값 필터를 거친 값으로 jitter 판정(단일 프레임
     # 스냅에 의한 오판 방지).
+    #
+    # 60차 계속6(B안): prob<TENTATIVE_PROB_GATE로 "잠깐" 떨어지는 것만으로는
+    # tentative_cnt를 리셋하지 않는다. 원인 실측(58차3번 원 사례, 정체구간
+    # 정지앞차)에서 modelV2 prob가 같은 물체를 계속 보는 중에도 0.0x~0.5
+    # 사이를 노이즈처럼 넓게 출렁여, "prob 하한 이탈=다른 물체" 가정이
+    # 틀렸음을 확인함(리셋 3회 전부 dPath/dRel과 무관, prob 출렁임 단독
+    # 원인). dRel/dPath jitter 게이트·dPath 절대값 게이트(=진짜 "다른
+    # 물체로 전환" 신호)는 그대로 유지 -- 이 프레임에서 튀면 여전히 리셋.
+    # prob<GATE인 프레임은 그냥 아무 것도 안 하고 넘어가(freeze), 카운트를
+    # 유지한 채 다음 tentative-구간 프레임에서 이어서 jitter 판정을 계속함.
     dRel_candidate = float(lead_msg.x[0]) - RADAR_TO_CAMERA
     if VISION_TRACK_TENTATIVE_PROB_GATE <= self.prob <= 0.5:
       yRel_candidate = float(-lead_msg.y[0])
@@ -506,9 +516,8 @@ class VisionTrack:
         self.tentative_cnt += 1
         self.tentative_dRel_last = dRel_filtered
         self.tentative_dPath_last = dPath_candidate
-    elif self.prob < VISION_TRACK_TENTATIVE_PROB_GATE:
-      self.tentative_cnt = 0
-      self.tentative_dRel_hist.clear()
+    # (60차 계속6, B안) prob<TENTATIVE_PROB_GATE 단독 리셋 분기 제거됨 --
+    # 위 dPath 절대값 게이트/dRel·dPath jitter 게이트만이 유효한 리셋 사유.
 
     register_ok = (self.prob > .5) or (self.tentative_cnt >= VISION_TRACK_TENTATIVE_CNT_GATE)
 
