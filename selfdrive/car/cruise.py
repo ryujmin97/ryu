@@ -496,11 +496,19 @@ class VCruiseCarrot:
         self._pause_auto_speed_up = False
         if self._soft_hold_active > 0:
           self._soft_hold_active = 0
-        elif self._cruise_ready or not CC.enabled or CS.cruiseState.standstill or self.carrot_cruise_active:
+        elif self._cruise_ready or CS.cruiseState.standstill or self.carrot_cruise_active:
           if False: #self._cruise_button_mode in [2, 3]:
             road_limit_kph = self.nRoadLimitSpeed * self.autoSpeedUptoRoadSpeedLimit
             if road_limit_kph > 1.0:
               v_cruise_kph = max(v_cruise_kph, road_limit_kph)
+        elif not CC.enabled:
+          # [세션79] 수동주행 중 첫 +RES(accelCruise) 인게이지: v_cruise_kph가
+          # CC.enabled=False인 동안 현재속도를 추종하지 않고 이전 값에 멈춰있으므로
+          # (update_v_cruise의 np.clip(v_cruise_kph,30,max)만 매프레임 반복 적용됨),
+          # 그 정체값을 그대로 쓰면 현재 속도보다 낮게 설정되어 감속이 발생할 수 있음.
+          # 반드시 현재 속도보다 높게(다음 단위 눈금으로 올림) 설정.
+          unit = self._cruise_speed_unit_basic if self.is_metric else self._cruise_speed_unit_basic * CV.MPH_TO_KPH
+          v_cruise_kph = math.ceil((self.v_ego_kph_set + 0.01) / unit) * unit
         elif self._v_cruise_kph_at_brake > 0 and v_cruise_kph < self._v_cruise_kph_at_brake:
           v_cruise_kph = self._v_cruise_kph_at_brake
           self._v_cruise_kph_at_brake = 0
