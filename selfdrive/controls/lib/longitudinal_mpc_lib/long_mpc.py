@@ -420,6 +420,24 @@ DREL_DISCONTINUITY_WINDOW_N = 5         # 최근 5프레임(~0.25s @ 20Hz) 내 �
 DISCONTINUITY_JERK_COST_BOOST_S = 1.0   # s : 부스트 유지시간(트리거 후 감쇠)
 DISCONTINUITY_JERK_COST_BOOST = 500.0   # 부스트 값(평시 최대 A_CHANGE_COST=200보다 큼)
 
+# 72차(방안 I, 2026-08-25 실차 재현: "정지앞차 레이더락온시 급감속"): 위
+# DREL_DISCONTINUITY_*는 "비전 단독 추적 중 dRel(거리) 급락"만 감지한다.
+# 그런데 실차 사례(route1 t=690.05)는 거리가 아니라 **레이더가 막 락온되는
+# 그 프레임의 vRel(속도)**이 불연속으로 튀는 경우였다 -- 비전이 6초 넘게
+# "리드 속도 12~16m/s(자차와 비슷, 안전)"로 낙관적으로 보고하다가, 레이더가
+# 락온되는 순간 실제 vRel이 -3.6 -> -10.8m/s로 급변하며 진짜(서행/정차)
+# 상태가 드러남. 이 전환 프레임 자체는 기존 코드(위 elif 분기)가 비전 부기
+# 리셋만 하고 불연속 판정을 하지 않아 사각지대였음.
+# 대응: 레이더가 False->True로 바뀌는 바로 그 프레임에서, 직전 프레임의
+# vRel 대비 이번 프레임 vRel이 RADAR_HANDOFF_VREL_JUMP_THRESH 이상 더
+# 접근방향(음수)으로 튀면 -- 이미 검증된 DISCONTINUITY_JERK_COST_BOOST를
+# 그대로 arm한다(새 부스트 값/메커니즘 추가 아님, 트리거 조건만 확장).
+# TTC danger override/proactive floor(frac>0)가 하나라도 걸리면 위
+# a_change_cost 적용부(L1087 부근)에서 즉시 무시되므로 진짜 위험 상황에는
+# 영향 없음 -- 도달 감속량이 아니라 도달 속도(저크)만 완만화.
+RADAR_HANDOFF_VREL_JUMP_THRESH = 3.0    # m/s : 레이더 락온 프레임의 vRel이 직전 프레임보다
+                                         #        이 이상 더 나빠지면(접근방향) 불연속으로 판정
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -602,6 +620,11 @@ class LongitudinalMpc:
     # (위 DISCONTINUITY_JERK_COST_BOOST_* 주석 참고)
     self._discontinuity_jerk_boost_timer = 0.0  # >0인 동안 부스트 윈도우 내, 매 사이클 감쇠
     self._lead0_danger_active = False           # process_lead(leadOne)의 danger override/저속강한감속 최신 상태
+
+    # 72차(방안 I): 레이더 락온 전환(vision->radar handoff) 프레임의 vRel
+    # 불연속 감지용 상태 (위 RADAR_HANDOFF_VREL_JUMP_THRESH 주석 참고)
+    self._prev_lead_radar = False        # 직전 프레임의 leadOne.radar -- False->True 엣지 검출용
+    self._prev_lead_vRel = None          # 직전 프레임의 leadOne.vRel (status True인 프레임에서만 갱신)
 
 
   def reset(self):
@@ -900,6 +923,15 @@ class LongitudinalMpc:
       self._vision_dRel_prev = dRel_now
     elif lead_one_status_now and radarstate.leadOne.radar:
       # radar just confirmed -- reset immediately, no grace (see comment above).
+      # 72차(방안 I): 부기 리셋 전에 먼저 락온 전환(False->True) 엣지인지
+      # 확인하고, 엣지라면 직전 프레임 vRel 대비 이번 프레임 vRel의 불연속
+      # 여부를 판정한다(위 RADAR_HANDOFF_VREL_JUMP_THRESH 주석 참고). 이미
+      # 락온이 유지 중인 프레임(엣지 아님)에는 매 사이클 재트리거되지
+      # 않도록 self._prev_lead_radar로 엣지만 골라낸다.
+      if (not self._prev_lead_radar) and self._prev_lead_vRel is not None:
+        vRel_now = float(radarstate.leadOne.vRel)
+        if (vRel_now - self._prev_lead_vRel) < -RADAR_HANDOFF_VREL_JUMP_THRESH:
+          self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
       self._vision_dRel_rate_window.clear()
@@ -918,6 +950,16 @@ class LongitudinalMpc:
     # resumes, one raw_rate sample will be computed across the gap duration
     # instead of one DT_MDL step, which the low-pass filter absorbs the same
     # way it absorbs any other single noisy sample.
+
+    # 72차(방안 I): 다음 프레임의 락온 엣지/vRel 불연속 판정을 위해 이번
+    # 프레임 상태를 저장. status가 False인 프레임(리드 완전 유실)에서는
+    # 갱신하지 않고 그대로 두어, 짧은 blip 이후 재등장 시에도 마지막으로
+    # 유효했던 vRel/radar 상태가 남아있게 한다 -- 리드가 진짜로 사라졌다가
+    # 완전히 새로 등록되는 경우는 _lead_acq_timer가 다시 짧아지므로 별도
+    # 신규등록 보호(NEW_LEAD_VLEAD_CORRECTION_SUPPRESS_S)가 이미 담당한다.
+    if lead_one_status_now:
+      self._prev_lead_radar = bool(radarstate.leadOne.radar)
+      self._prev_lead_vRel = float(radarstate.leadOne.vRel)
 
     if radarstate.leadOne.status:
       j_lead = radarstate.leadOne.jLead
