@@ -647,7 +647,7 @@ class LongitudinalMpc:
     self._lead0_danger_active = False           # process_lead(leadOne)의 danger override/저속강한감속 최신 상태
     # 73차: 트리거 소스별 hard-hold 유지시간/게이트 분리를 위한 상태
     # (위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고).
-    self._discontinuity_trigger_source = None   # 'discontinuity' | 'handoff' | None
+    self._discontinuity_trigger_source = None   # 'discontinuity' | 'discontinuity_lc' | 'handoff' | None
     self._handoff_release_value = None          # 방안I 전용 release-rate 감쇠 중인 현재값
 
     # 72차(방안 I): 레이더 락온 전환(vision->radar handoff) 프레임의 vRel
@@ -929,11 +929,24 @@ class LongitudinalMpc:
         self._lead_acq_timer = 0.0
         # 66차/67차(방안G): 같은 discontinuity 트리거 지점에서 저크비용 부스트도
         # 함께 arm -- 목표거리(v_lead 보정)와는 별개로 도달 속도만 완만하게.
-        # 73차: 소스 태그를 'discontinuity'로 설정 -- hard-hold 유지시간은
-        # 기존 DISCONTINUITY_JERK_COST_BOOST_S(1.0s) 그대로, 진행 중이던
-        # 방안I release-rate 감쇠가 있었다면 새 트리거로 대체되므로 정리.
-        self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
-        self._discontinuity_trigger_source = 'discontinuity'
+        # 75차 방향(b)+76차(duration 통합): 트리거 시점이 차선변경 중(이번
+        # 프레임 lane_change_blinker_active 또는 직전 프레임
+        # _lane_change_vlead_hold_timer>0.0, 60차 계속2가 이미 배선한 hold
+        # 유예 상태 재사용)이면 -- 차선변경 중 target 전환은 진짜 위험이
+        # 아니라 정상적인 트랙 전환이라는 판단(danger override만으로 안전망
+        # 충분, FINDINGS.md 75차 계속2 참고) -- 방안I(핸드오프)와 완전히
+        # 동일하게 취급: hard-hold 4.0s(RADAR_HANDOFF_JERK_BOOST_S) + 소스
+        # 'discontinuity_lc'(아래 a_change_cost 적용부에서 is_handoff_source에
+        # 포함돼 release-rate 완만감쇠까지 handoff와 동일 경로를 탐).
+        # 차선변경과 무관한 일반 discontinuity는 기존 그대로(1.0s hard-hold,
+        # 소스 'discontinuity', frac 게이트 + hard-cutoff) -- 이미 실차검증
+        # 끝난 조합이라 회귀 방지.
+        if lane_change_blinker_active or self._lane_change_vlead_hold_timer > 0.0:
+          self._discontinuity_jerk_boost_timer = RADAR_HANDOFF_JERK_BOOST_S
+          self._discontinuity_trigger_source = 'discontinuity_lc'
+        else:
+          self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
+          self._discontinuity_trigger_source = 'discontinuity'
         self._handoff_release_value = None
 
       if self._vision_dRel_prev is not None:
@@ -1161,15 +1174,20 @@ class LongitudinalMpc:
       else:
         base_a_change_cost = A_CHANGE_COST
 
-      # 66차/67차(방안G) + 73차(방안I 소스분리/release-rate): discontinuity
-      # 직후 부스트 윈도우 내 + danger override/저속강한감속 미발동(process_lead)
-      # 이면 저크비용을 한시적으로 강화한다. 트리거 소스에 따라 게이트/유지
-      # 방식이 다르다(위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고):
-      #   - 'discontinuity'(방안C/G): 기존 그대로 -- proactive floor(frac)도
-      #     미발동일 때만, hard-hold(1.0s) 종료 즉시 base로 복귀.
-      #   - 'handoff'(방안I): frac은 무관(danger_active만 확인), hard-hold
+      # 66차/67차(방안G) + 73차(방안I 소스분리/release-rate) + 76차(discontinuity_lc
+      # 통합): discontinuity 직후 부스트 윈도우 내 + danger override/저속강한감속
+      # 미발동(process_lead)이면 저크비용을 한시적으로 강화한다. 트리거 소스에
+      # 따라 게이트/유지 방식이 다르다(위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고):
+      #   - 'discontinuity'(방안C/G, 차선변경 무관): 기존 그대로 -- proactive
+      #     floor(frac)도 미발동일 때만, hard-hold(1.0s) 종료 즉시 base로 복귀.
+      #   - 'handoff'(방안I) / 'discontinuity_lc'(75차b+76차, 차선변경 중
+      #     discontinuity): frac은 무관(danger_active만 확인), hard-hold
       #     (4.0s) 종료 후에도 release_rate(100/s)로 base까지 완만히 감쇠.
-      is_handoff_source = (self._discontinuity_trigger_source == 'handoff')
+      #     75차가 발견한 "게이트는 풀렸지만 hard-hold 1.0s로 위험구간
+      #     최저점(트리거 후 1.4~1.65s) 전에 소진돼 무력화"되는 한계를
+      #     76차가 handoff와 동일한 4.0s+release-rate로 해소(FINDINGS.md
+      #     76차 참고).
+      is_handoff_source = (self._discontinuity_trigger_source in ('handoff', 'discontinuity_lc'))
       boost_gate_ok = (self._discontinuity_jerk_boost_timer > 0.0) and not self._lead0_danger_active
       if not is_handoff_source:
         boost_gate_ok = boost_gate_ok and (frac <= 0.0)
