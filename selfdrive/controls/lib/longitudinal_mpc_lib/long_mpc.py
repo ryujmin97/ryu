@@ -412,6 +412,14 @@ LANE_CHANGE_VLEAD_CORRECTION_HOLD_S = 1.0   # s : 차선변경(blinker) 종료 �
 DREL_DISCONTINUITY_DROP_THRESH = 15.0   # m : 이 이상 급락하면 급락으로 판정
 DREL_DISCONTINUITY_WINDOW_N = 5         # 최근 5프레임(~0.25s @ 20Hz) 내 기준
 
+# 66차/67차(방안G): discontinuity(위 DREL_DISCONTINUITY_* 참고) 직후 아직
+# 절대거리가 부족한 상황(danger override는 아님, 예: 세그4-1류)에서 목표거리
+# 자체는 그대로 두고 MPC가 그 거리에 "도달하는 속도"(저크비용)만 한시적으로
+# 완만하게 만든다. danger override/저속강한감속(process_lead)이나 proactive
+# floor(frac_time/frac_ttc/frac_rate) 중 하나라도 위험을 감지하면 즉시 무시.
+DISCONTINUITY_JERK_COST_BOOST_S = 1.0   # s : 부스트 유지시간(트리거 후 감쇠)
+DISCONTINUITY_JERK_COST_BOOST = 500.0   # 부스트 값(평시 최대 A_CHANGE_COST=200보다 큼)
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -590,6 +598,11 @@ class LongitudinalMpc:
     # launch bypass state (see LAUNCH_BYPASS_* above, FINDINGS.md 45차)
     self._launch_bypass_active = False   # True인 동안 ttc_accel_weight()(38차) 완전 우회
 
+    # 66차/67차(방안G): discontinuity 직후 a_change_cost 한시적 부스트 상태
+    # (위 DISCONTINUITY_JERK_COST_BOOST_* 주석 참고)
+    self._discontinuity_jerk_boost_timer = 0.0  # >0인 동안 부스트 윈도우 내, 매 사이클 감쇠
+    self._lead0_danger_active = False           # process_lead(leadOne)의 danger override/저속강한감속 최신 상태
+
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -668,7 +681,7 @@ class LongitudinalMpc:
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     return lead_xv
   
-  def process_lead(self, lead, j_lead, vision_dRel_rate=None):
+  def process_lead(self, lead, j_lead, vision_dRel_rate=None, is_lead0=False):
     v_ego = self.x0[1]
 
     # launch bypass state update (FINDINGS.md 45차) -- 정차->출발 감지는 리드 유무와
@@ -727,7 +740,12 @@ class LongitudinalMpc:
         v_ego <= LOW_SPEED_STRONG_DECEL_V_EGO_GATE
         and a_lead <= LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH
       )
-      if ttc_now <= LEAD_ACQ_TTC_DANGER or low_speed_strong_lead_decel:
+      lead0_danger_now = ttc_now <= LEAD_ACQ_TTC_DANGER or low_speed_strong_lead_decel
+      if is_lead0:
+        # 67차(방안G)가 a_change_cost 부스트 게이트에서 참조하는 최신 위험
+        # 판정 -- leadOne 호출 시에만 갱신(leadTwo는 부스트와 무관).
+        self._lead0_danger_active = lead0_danger_now
+      if lead0_danger_now:
         # 실제 위험(TTC<=2.5s, radard LeadBlend danger_hold와 동일 임계값) 또는
         # 저속+앞차 강한감속이면 rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을
         # 늦추지 않는다. launch bypass 여부와 무관하게 항상 최우선.
@@ -753,6 +771,10 @@ class LongitudinalMpc:
       # 리드가 없는 사이클엔 이전 리드와 무관하므로 다음 리드 재획득 시 불필요한
       # rise-rate 제한이 이어지지 않도록 리셋(안전측 기본값 1.0으로).
       self._lead_accel_weight_prev = 1.0
+      if is_lead0:
+        # 리드가 없으면 위험 신호도 없음 -- 부스트 게이트가 stale True에
+        # 걸려 있지 않도록 안전측(무위험)으로 리셋.
+        self._lead0_danger_active = False
 
     # MPC will not converge if immediate crash is expected
     # Clip lead distance to what is still possible to brake for
@@ -781,6 +803,10 @@ class LongitudinalMpc:
     a_ego = self.x0[2]
     t_follow = carrot.get_T_FOLLOW(personality, v_ego, a_ego)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
+
+    # 66차/67차(방안G): discontinuity 부스트 타이머 감쇠(매 사이클, lane_change
+    # hold 타이머와 동일 패턴) -- arm은 아래 discontinuity 트리거 지점에서.
+    self._discontinuity_jerk_boost_timer = max(0.0, self._discontinuity_jerk_boost_timer - self.dt)
 
     # lead-acquisition ramp bookkeeping: source (vision-first or radar-first)
     # doesn't matter here -- only radarstate.leadOne.status is watched, so a
@@ -849,6 +875,9 @@ class LongitudinalMpc:
         # 등이 자동으로 유예된다. TTC danger override(process_lead 내
         # ttc_now<=LEAD_ACQ_TTC_DANGER)는 이 리셋과 무관하게 항상 그대로 작동.
         self._lead_acq_timer = 0.0
+        # 66차/67차(방안G): 같은 discontinuity 트리거 지점에서 저크비용 부스트도
+        # 함께 arm -- 목표거리(v_lead 보정)와는 별개로 도달 속도만 완만하게.
+        self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
 
       if self._vision_dRel_prev is not None:
         raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
@@ -916,7 +945,7 @@ class LongitudinalMpc:
                               if self._lead_acq_timer >= VISION_CLOSING_RATE_MIN_TIME and not vlead_correction_suppressed
                               else None)
     lead_xv_0, lead_v_0 = self.process_lead(radarstate.leadOne, np.clip(self.j_lead * carrot.j_lead_factor, -1.0, 1.0),
-                                             vision_dRel_rate=vision_rate_for_lead0)
+                                             vision_dRel_rate=vision_rate_for_lead0, is_lead0=True)
     lead_xv_1, _ = self.process_lead(radarstate.leadTwo, 0.0)
 
     mode = self.mode
@@ -947,6 +976,9 @@ class LongitudinalMpc:
     # apply the lead-acquisition proactive floor (see LEAD_ACQ_RAMP_TIME /
     # LEAD_ACQ_TTC_DANGER) only in 'acc' mode, only once the acquisition has
     # been confirmed (not a one-off blip).
+    # 67차(방안G): 아래 블록 밖(조건 미충족)에서도 항상 참조 가능하도록
+    # 기본값을 먼저 정의 -- a_change_cost 부스트 게이트가 이 값을 사용.
+    frac = 0.0
     if mode == 'acc' and radarstate.leadOne.status and v_ego >= LEAD_ACQ_MIN_V_EGO and self._lead_acq_ramp_started:
       # elapsed-time component: 0 -> 1 over LEAD_ACQ_RAMP_TIME, then fully
       # released (0) once the window closes -- a genuinely far/safe lead
@@ -1044,9 +1076,20 @@ class LongitudinalMpc:
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
       if radarstate.leadOne.status:
-        self.a_change_cost = np.interp(abs(self.j_lead), [0.3, 2.0], [A_CHANGE_COST, 20])
+        base_a_change_cost = np.interp(abs(self.j_lead), [0.3, 2.0], [A_CHANGE_COST, 20])
       else:
-        self.a_change_cost = A_CHANGE_COST
+        base_a_change_cost = A_CHANGE_COST
+
+      # 66차/67차(방안G): discontinuity 직후 부스트 윈도우 내 + danger
+      # override/저속강한감속 미발동(process_lead) + proactive floor(frac)
+      # 미발동 -- 셋 다 무위험일 때만 저크비용을 한시적으로 강화한다. 하나라도
+      # 위험을 감지하면 즉시 기존 j_lead 기반 식(base_a_change_cost)으로 복귀.
+      if (self._discontinuity_jerk_boost_timer > 0.0
+          and not self._lead0_danger_active
+          and frac <= 0.0):
+        self.a_change_cost = DISCONTINUITY_JERK_COST_BOOST
+      else:
+        self.a_change_cost = base_a_change_cost
 
       #safe_distance = lead_0_obstacle[0] - get_safe_obstacle_distance(v_ego, comfort_brake, stop_distance)
       self.lead_danger_factor = LEAD_DANGER_FACTOR #np.interp(safe_distance, [-30.0, 0.0], [0.9, LEAD_DANGER_FACTOR]) # 이걸적용하니, 사고방지턱 감속시 너무 급정거하는것 같음.
