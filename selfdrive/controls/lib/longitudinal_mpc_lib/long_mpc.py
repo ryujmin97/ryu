@@ -438,6 +438,31 @@ DISCONTINUITY_JERK_COST_BOOST = 500.0   # 부스트 값(평시 최대 A_CHANGE_C
 RADAR_HANDOFF_VREL_JUMP_THRESH = 3.0    # m/s : 레이더 락온 프레임의 vRel이 직전 프레임보다
                                          #        이 이상 더 나빠지면(접근방향) 불연속으로 판정
 
+# 73차(계속~계속3, replay_boost_duration.py route1/route2 실측 검증 완료):
+# 방안I(레이더 핸드오프)이 겨냥한 급감속은 방안C/G(찰나성 vision 노이즈)와
+# 달리 수초(4~5.5초) 지속되는 진짜 감속이라, 위 DISCONTINUITY_JERK_COST_BOOST_S
+# =1.0s 하나로는 boost가 위험구간 중반에 소진돼 무력화됨(72차 계속2에서
+# 원인 확정). 대응은 두 갈래 -- (1) 트리거 소스별로 hard-hold 유지시간을
+# 분리(방안I 전용 4.0s, 방안C/G는 기존 1.0s 그대로), (2) hard-hold 종료 후
+# base로 즉시 꺼지는 대신 release_rate(cost/s)로 완만히 감쇠. 4.0s+100/s
+# 조합이 5.0s+150/s 계열과 커버율이 거의 동급(route1/route2 실측
+# 68.0%/98.2% vs 72.8%/100.9%)이면서, "완전부스트 유지" 구간을 짧게 가져가고
+# 나머지는 완만한 꼬리로 커버해 원래 방안G의 "찰나성 완화" 취지에 더 가까움
+# (FINDINGS.md 73차/73차 계속3 참고). route1이 68%로 미달인 것은 discontinuity
+# (t=687.850)+handoff(t≈690.0) 이중 트리거가 8초 가까이 이어지는 구조적
+# 한계 -- 무리하게 더 늘리지 않기로 함, 실차 체감 확인 후 필요시 재논의.
+#
+# split_gate(방안I 전용): frac(찰나성 노이즈용 proactive floor)은 이
+# 트리거 소스에는 설계 의도상 무관하다고 판단 -- 방안I이 겨냥한 시나리오는
+# 정의상 frac_ttc를 거의 즉시 끌어올리므로(정지/서행 앞차의 진짜 상태가
+# 락온 순간 확정되는 것뿐, 새로운 미확인 위험이 아님), danger override
+# (TTC<=2.5s)만 있으면 안전망은 충분(73차 계속 결정, 재확인 유지).
+# 방안C/G(dRel discontinuity) 트리거는 기존 게이트(danger_active 무관 +
+# frac<=0.0) 그대로 유지 -- 이미 실차검증까지 끝난 조합이라 회귀 방지.
+RADAR_HANDOFF_JERK_BOOST_S = 4.0            # s : 방안I 전용 hard-hold 유지시간(방안C/G의
+                                             #     DISCONTINUITY_JERK_COST_BOOST_S=1.0과 별개)
+RADAR_HANDOFF_JERK_BOOST_RELEASE_RATE = 100.0  # cost/s : hard-hold 종료 후 base까지 이 속도로 선형 감쇠
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -620,6 +645,10 @@ class LongitudinalMpc:
     # (위 DISCONTINUITY_JERK_COST_BOOST_* 주석 참고)
     self._discontinuity_jerk_boost_timer = 0.0  # >0인 동안 부스트 윈도우 내, 매 사이클 감쇠
     self._lead0_danger_active = False           # process_lead(leadOne)의 danger override/저속강한감속 최신 상태
+    # 73차: 트리거 소스별 hard-hold 유지시간/게이트 분리를 위한 상태
+    # (위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고).
+    self._discontinuity_trigger_source = None   # 'discontinuity' | 'handoff' | None
+    self._handoff_release_value = None          # 방안I 전용 release-rate 감쇠 중인 현재값
 
     # 72차(방안 I): 레이더 락온 전환(vision->radar handoff) 프레임의 vRel
     # 불연속 감지용 상태 (위 RADAR_HANDOFF_VREL_JUMP_THRESH 주석 참고)
@@ -900,7 +929,12 @@ class LongitudinalMpc:
         self._lead_acq_timer = 0.0
         # 66차/67차(방안G): 같은 discontinuity 트리거 지점에서 저크비용 부스트도
         # 함께 arm -- 목표거리(v_lead 보정)와는 별개로 도달 속도만 완만하게.
+        # 73차: 소스 태그를 'discontinuity'로 설정 -- hard-hold 유지시간은
+        # 기존 DISCONTINUITY_JERK_COST_BOOST_S(1.0s) 그대로, 진행 중이던
+        # 방안I release-rate 감쇠가 있었다면 새 트리거로 대체되므로 정리.
         self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
+        self._discontinuity_trigger_source = 'discontinuity'
+        self._handoff_release_value = None
 
       if self._vision_dRel_prev is not None:
         raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
@@ -931,7 +965,12 @@ class LongitudinalMpc:
       if (not self._prev_lead_radar) and self._prev_lead_vRel is not None:
         vRel_now = float(radarstate.leadOne.vRel)
         if (vRel_now - self._prev_lead_vRel) < -RADAR_HANDOFF_VREL_JUMP_THRESH:
-          self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
+          # 73차: 방안I 전용 hard-hold 유지시간(4.0s, 위 RADAR_HANDOFF_JERK_BOOST_S
+          # 주석 참고) -- 방안C/G의 1.0s와는 별개. 소스 태그 'handoff'로
+          # 아래 a_change_cost 적용부에서 split_gate/release-rate가 적용됨.
+          self._discontinuity_jerk_boost_timer = RADAR_HANDOFF_JERK_BOOST_S
+          self._discontinuity_trigger_source = 'handoff'
+          self._handoff_release_value = None
       self._vision_dRel_prev = None
       self._vision_dRel_rate = 0.0
       self._vision_dRel_rate_window.clear()
@@ -1122,16 +1161,39 @@ class LongitudinalMpc:
       else:
         base_a_change_cost = A_CHANGE_COST
 
-      # 66차/67차(방안G): discontinuity 직후 부스트 윈도우 내 + danger
-      # override/저속강한감속 미발동(process_lead) + proactive floor(frac)
-      # 미발동 -- 셋 다 무위험일 때만 저크비용을 한시적으로 강화한다. 하나라도
-      # 위험을 감지하면 즉시 기존 j_lead 기반 식(base_a_change_cost)으로 복귀.
-      if (self._discontinuity_jerk_boost_timer > 0.0
-          and not self._lead0_danger_active
-          and frac <= 0.0):
-        self.a_change_cost = DISCONTINUITY_JERK_COST_BOOST
+      # 66차/67차(방안G) + 73차(방안I 소스분리/release-rate): discontinuity
+      # 직후 부스트 윈도우 내 + danger override/저속강한감속 미발동(process_lead)
+      # 이면 저크비용을 한시적으로 강화한다. 트리거 소스에 따라 게이트/유지
+      # 방식이 다르다(위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고):
+      #   - 'discontinuity'(방안C/G): 기존 그대로 -- proactive floor(frac)도
+      #     미발동일 때만, hard-hold(1.0s) 종료 즉시 base로 복귀.
+      #   - 'handoff'(방안I): frac은 무관(danger_active만 확인), hard-hold
+      #     (4.0s) 종료 후에도 release_rate(100/s)로 base까지 완만히 감쇠.
+      is_handoff_source = (self._discontinuity_trigger_source == 'handoff')
+      boost_gate_ok = (self._discontinuity_jerk_boost_timer > 0.0) and not self._lead0_danger_active
+      if not is_handoff_source:
+        boost_gate_ok = boost_gate_ok and (frac <= 0.0)
+
+      if is_handoff_source:
+        # release-rate 감쇠 중에도 danger override가 뜨면 즉시 base로
+        # 강제복귀(원본 설계 원칙 유지) -- frac은 이 소스엔 무관.
+        force_revert = self._lead0_danger_active
+        if boost_gate_ok:
+          self.a_change_cost = DISCONTINUITY_JERK_COST_BOOST
+          self._handoff_release_value = DISCONTINUITY_JERK_COST_BOOST
+        elif force_revert:
+          self.a_change_cost = base_a_change_cost
+          self._handoff_release_value = None
+        elif self._handoff_release_value is not None:
+          self._handoff_release_value = max(
+            base_a_change_cost, self._handoff_release_value - RADAR_HANDOFF_JERK_BOOST_RELEASE_RATE * self.dt)
+          self.a_change_cost = self._handoff_release_value
+          if self._handoff_release_value <= base_a_change_cost + 1e-6:
+            self._handoff_release_value = None
+        else:
+          self.a_change_cost = base_a_change_cost
       else:
-        self.a_change_cost = base_a_change_cost
+        self.a_change_cost = DISCONTINUITY_JERK_COST_BOOST if boost_gate_ok else base_a_change_cost
 
       #safe_distance = lead_0_obstacle[0] - get_safe_obstacle_distance(v_ego, comfort_brake, stop_distance)
       self.lead_danger_factor = LEAD_DANGER_FACTOR #np.interp(safe_distance, [-30.0, 0.0], [0.9, LEAD_DANGER_FACTOR]) # 이걸적용하니, 사고방지턱 감속시 너무 급정거하는것 같음.
