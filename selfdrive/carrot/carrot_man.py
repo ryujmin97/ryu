@@ -49,6 +49,10 @@ NetworkType = log.DeviceState.NetworkType
 #V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 45, 35, 30]
 V_CURVE_LOOKUP_BP = [0., 1./800., 1./670., 1./560., 1./440., 1./360., 1./265., 1./190., 1./135., 1./85., 1./55., 1./30., 1./25.]
 V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 40, 15, 5]
+# [91차] carrot_navi_route()의 역방향 DP 감속 전환 시점에서 route가 vturn보다
+# 먼저 사전감속을 시작하도록 목표속도를 이만큼 더 낮게 취급(km/h). 89차 대안3
+# ("안전마진 휴리스틱")을 시뮬레이션 검증(커브A/B + 직선 154초) 후 확정.
+ROUTE_ENTRY_MARGIN_KPH = 25.0
 
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
@@ -486,7 +490,18 @@ class CarrotMan:
                 next_out_speed = out_speeds[i + 1]
 
                 if target_speed < next_out_speed:
-                  time_delay = max(0, ((v_ego_kph - target_speed) / accel_limit_kmh))
+                  # [91차] route가 vturn보다 사전감속을 더 일찍 시작하도록, 감속 전환
+                  # 시점의 목표속도(target_speed)를 실제보다 ROUTE_ENTRY_MARGIN_KPH만큼
+                  # 더 낮게 취급해 time_delay(=필요 소요시간)를 부풀린다. 최종 채택되는
+                  # target_speed 자체(min(target_speed, max_allowed_speed))는 바꾸지
+                  # 않으므로 커브 정점에서의 목표값은 그대로 -- 오직 "언제부터 감속
+                  # 스케줄을 당겨서 반영하기 시작할지"만 앞당김.
+                  # 시뮬레이션 검증(devnotes work): 커브A(완만한 램프)에서 vturn 실제
+                  # 전환보다 4.26초 먼저 개입, 최종값도 vturn 실측치(73~77)에 근접(79).
+                  # 커브B(급한 램프+교차로)/직선 154초 구간 둘 다 오탐(불필요 조기개입)
+                  # 없음 확인. margin_kph=25는 검증한 20/30 사이 절충값(사용자 결정).
+                  margin_target_speed = max(0.0, target_speed - ROUTE_ENTRY_MARGIN_KPH)
+                  time_delay = max(0, ((v_ego_kph - margin_target_speed) / accel_limit_kmh))
                   time_wait = - time_delay
                   route_prev_state = 'decel'
                 elif target_speed > next_out_speed and route_prev_state == 'decel':
