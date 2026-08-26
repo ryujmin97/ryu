@@ -245,7 +245,7 @@ class CarrotMan:
     # 과속방지턱(calculate_current_speed)과 동일한 v_i^2 = v_f^2 + 2ad 물리공식을 커브에도
     # 적용하기 위한 파라미터. AutoNaviSpeedBumpTime/AutoNaviSpeedDecelRate 기본값과 동일하게
     # 맞춰서 사용자가 이미 익숙한 방지턱 감속 '느낌'과 최대한 비슷하게 시작한다.
-    self.vturn_safe_time = 1.0     # 초. 목표속도에 여유있게 미리 도달해 정점까지 유지
+    self.vturn_safe_time = 2.0     # 초. 목표속도에 여유있게 미리 도달해 정점까지 유지 (81차: 1.0s는 실제 차량 감속 반응 램프업 시간 대비 부족하다는 체감 보고로 2.0s 상향, c3-ms-curv 실차검증 대상)
     self.vturn_decel_rate = 1.2    # m/s^2. 방지턱 기본 감속률(AutoNaviSpeedDecelRate=120)과 동일
     # 아래는 모델 프레임 노이즈 제거용 저역통과 필터일 뿐, 감속/가속의 '모양'은 위 물리공식이
     # 만든다. 별도의 '진입/탈출 이벤트' 판정이나 지연(hold) 로직은 두지 않는다 - turnSpeed는

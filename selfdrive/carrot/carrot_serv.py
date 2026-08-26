@@ -1033,10 +1033,13 @@ class CarrotServ:
       speed_n_sources.append((max(abs(vturn_speed), self.autoCurveSpeedLowerLimit), "vturn"))
 
     route_speed = max(route_speed * self.mapTurnSpeedFactor, self.autoCurveSpeedLowerLimit)
-    if self.turnSpeedControlMode == 2:
-      if -500 < self.xDistToTurn < 500:
-        speed_n_sources.append((route_speed, "route"))
-    elif self.turnSpeedControlMode in [3, 4]:
+    if self.turnSpeedControlMode in [2, 3, 4]:
+      # 81차: mode 2의 -500<xDistToTurn<500(TBT 회전지점 근접) 게이트를 제거.
+      # 기존엔 TBT 안내가 없는 일반 도로 굽이길에서 route_speed가 계산은 되고도
+      # 후보에서 빠져 vturn 단독으로만 대응하던 사각지대가 있었음(mode 2도 mode
+      # 3/4처럼 항상 참가하도록 통일). vturn 참가 조건(위 [1,2] 분기)은 그대로라
+      # mode 2에서 vturn+route가 함께 경쟁하는 구조가 됨(mode 3/4는 기존대로
+      # vturn 자체가 미참가라 route 단독).
       speed_n_sources.append((route_speed, "route"))
       #speed_n_sources.append((self.calculate_current_speed(dist, speed * self.mapTurnSpeedFactor, 0, 1.2), "route"))
 
