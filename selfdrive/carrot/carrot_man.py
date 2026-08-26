@@ -143,6 +143,22 @@ def get_path_after_distance(start_index, coordinates, current_position, distance
     return path_after_distance, start_index, closest_point
 
 
+# [84차] route 커브 lookahead 거리 캡을 300m 고정값 대신 v_ego/accel_limit
+# 기반으로 동적 계산(300~500m). "assumed_target_kph"는 실제 커브 목표속도가
+# 아니라(그건 carrot_navi_route()의 곡률 계산 이후에야 정해짐 - 이 함수는
+# 그보다 먼저 호출돼야 해서 실제 목표속도를 알 수 없음) 캡 크기 산정용
+# 가정값(흔한 조임 커브 수준)일 뿐이다. 저속(<=60km/h 부근)에서는 항상
+# min_m(기존 300m)으로 수렴해 회귀 없음, 고속에서만 max_m(500m)까지 확장.
+def compute_route_lookahead_distance(v_ego_kph, accel_limit_mss, min_m=300.0, max_m=500.0,
+                                      assumed_target_kph=30.0):
+  if accel_limit_mss is None or accel_limit_mss <= 0:
+    return min_m
+  v_ego_ms = max(0.0, v_ego_kph) / 3.6
+  v_target_ms = assumed_target_kph / 3.6
+  needed_m = max(0.0, (v_ego_ms ** 2 - v_target_ms ** 2) / (2.0 * accel_limit_mss))
+  return float(min(max_m, max(min_m, needed_m)))
+
+
 def calculate_angle(point1, point2):
     delta_lon = point2[0] - point1[0]
     delta_lat = point2[1] - point1[1]
@@ -402,7 +418,10 @@ class CarrotMan:
 
     distance_interval = 10.0
     out_speed = 300
-    path, self.navi_points_start_index, start_point = get_path_after_distance(self.navi_points_start_index, self.navi_points, current_position, 300)
+    # [84차] 300m 고정 캡 -> v_ego/accel_limit 기반 동적 캡(300~500m)
+    route_lookahead_m = compute_route_lookahead_distance(self.sm['carState'].vEgo * 3.6,
+                                                          self.carrot_serv.autoNaviSpeedDecelRate)
+    path, self.navi_points_start_index, start_point = get_path_after_distance(self.navi_points_start_index, self.navi_points, current_position, route_lookahead_m)
     relative_coords = []
     if path:
         #relative_coords = gps_to_relative_xy(path, current_position, heading_deg)
