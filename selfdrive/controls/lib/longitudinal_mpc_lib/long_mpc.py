@@ -927,6 +927,18 @@ class LongitudinalMpc:
         # 등이 자동으로 유예된다. TTC danger override(process_lead 내
         # ttc_now<=LEAD_ACQ_TTC_DANGER)는 이 리셋과 무관하게 항상 그대로 작동.
         self._lead_acq_timer = 0.0
+        # 94차(방안 D, 63차 계속 r1-14 사각지대 해소): frac_rate/frac_ttc는
+        # 위 _lead_acq_timer 리셋과 무관하게 self._vision_dRel_rate를 직접
+        # 읽으므로(아래 frac_rate 계산부 참고), discontinuity 트리거 시점의
+        # 오염된 rate/window/prev도 함께 리셋해야 한다 -- 그렇지 않으면
+        # radar 락온 전에 급감속이 이미 끝나버리는 사례(r1-14류)에서는
+        # frac_rate가 discontinuity 이후에도 계속 1.0으로 유지돼 위 방안C의
+        # 신규등록 suppress가 사실상 무효화된다(FINDINGS.md 63차 계속 참고).
+        # vision_dRel_prev도 None으로 리셋해 이번 프레임 raw_rate 계산 자체를
+        # 건너뛴다(급락 자체가 다시 raw_rate로 흘러들어가는 것을 방지).
+        self._vision_dRel_rate = 0.0
+        self._vision_dRel_rate_window.clear()
+        self._vision_dRel_prev = None
         # 66차/67차(방안G): 같은 discontinuity 트리거 지점에서 저크비용 부스트도
         # 함께 arm -- 목표거리(v_lead 보정)와는 별개로 도달 속도만 완만하게.
         # 75차 방향(b)+76차(duration 통합): 트리거 시점이 차선변경 중(이번
