@@ -407,6 +407,19 @@ VISION_TRACK_TENTATIVE_DPATH_ABS_GATE = 1.75  # m, |dPath|가 이 이상이면(�
                                                 #  절대값 게이트 병행 필요, 37차 SCC_FALLBACK_DPATH_GATE=2.0m와 동일 원리)
 VISION_TRACK_TENTATIVE_MEDIAN_WINDOW = 3   # 프레임, tentative dRel 판정 전용 경량 중앙값 필터 윈도우
 
+# 87차: 60차 계속6(B안)이 남긴 사각지대 수정 -- tentative_cnt>=CNT_GATE로
+# register_ok가 한번 래치되면, 이후 prob가 TENTATIVE_PROB_GATE(0.35) 밑으로
+# "짧게"가 아니라 "영구적으로" 주저앉는 경우 이를 다시 풀 방법이 없었음
+# (기존 리셋 경로 3개 전부 prob가 [0.35,0.5] 구간 안에 있을 때만 평가됨).
+# 실차 재현: 커브 진입부에서 0.5s간 애매한 물체를 스친 후 실제로는 대상이
+# 없었는데, leadStatus=True가 120초 내내 유지되며 매 프레임 노이즈성
+# dRel_candidate를 실제 리드처럼 반영 -> desiredSpeed/급감속 유발.
+# B안 취지(진짜 리드의 짧은 prob 출렁임을 오인 리셋하지 않음)는 그대로
+# 유지하면서, "짧은 출렁임"과 "영구적 소실"을 시간 길이로 구분한다.
+VISION_TRACK_GHOST_TIMEOUT_S = 3.0  # prob가 TENTATIVE_PROB_GATE 밑으로 이만큼
+                                     # 연속 유지되면 tentative 래치 강제 해제
+                                     # (NEEDS_VALIDATION, 실차 반응 보고 튜닝 필요)
+
 class VisionTrack:
   def __init__(self, radar_ts):
     self.radar_ts = radar_ts
@@ -438,6 +451,8 @@ class VisionTrack:
     self.tentative_dRel_last = 0.0
     self.tentative_dPath_last = 0.0
     self.tentative_dRel_hist: deque[float] = deque(maxlen=VISION_TRACK_TENTATIVE_MEDIAN_WINDOW)
+    # 87차: prob가 TENTATIVE_PROB_GATE 밑으로 연속 유지된 시간(초) 누적
+    self.ghost_low_prob_time = 0.0
 
   def get_lead(self, md):
     #aLeadK = 0.0 if self.mixRadarInfo in [3] else clip(self.aLeadK, self.aLead - 1.0, self.aLead + 1.0)
@@ -518,6 +533,21 @@ class VisionTrack:
         self.tentative_dPath_last = dPath_candidate
     # (60차 계속6, B안) prob<TENTATIVE_PROB_GATE 단독 리셋 분기 제거됨 --
     # 위 dPath 절대값 게이트/dRel·dPath jitter 게이트만이 유효한 리셋 사유.
+
+    # 87차: 위 리셋 경로들은 prob가 [TENTATIVE_PROB_GATE, 0.5] 구간 안에 있을
+    # 때만 평가되므로, prob가 이 구간보다도 더 아래로 완전히 주저앉으면
+    # (모델이 "대상 없음"에 가깝게 확신) 어떤 리셋 경로도 실행되지 않는다.
+    # 이 상태가 GHOST_TIMEOUT_S만큼 연속되면 대상이 사라졌다고 보고
+    # tentative 래치를 강제 해제한다. B안이 다루던 "짧은 출렁임"은
+    # 타임아웃보다 훨씬 짧으므로 영향 없음(회귀 없음), "영구 소실"만 걸러냄.
+    if self.prob < VISION_TRACK_TENTATIVE_PROB_GATE:
+      self.ghost_low_prob_time += self.radar_ts
+    else:
+      self.ghost_low_prob_time = 0.0
+
+    if self.ghost_low_prob_time >= VISION_TRACK_GHOST_TIMEOUT_S:
+      self.tentative_cnt = 0
+      self.tentative_dRel_hist.clear()
 
     register_ok = (self.prob > .5) or (self.tentative_cnt >= VISION_TRACK_TENTATIVE_CNT_GATE)
 

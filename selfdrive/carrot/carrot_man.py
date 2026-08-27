@@ -49,6 +49,10 @@ NetworkType = log.DeviceState.NetworkType
 #V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 45, 35, 30]
 V_CURVE_LOOKUP_BP = [0., 1./800., 1./670., 1./560., 1./440., 1./360., 1./265., 1./190., 1./135., 1./85., 1./55., 1./30., 1./25.]
 V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 40, 15, 5]
+# [91차] carrot_navi_route()의 역방향 DP 감속 전환 시점에서 route가 vturn보다
+# 먼저 사전감속을 시작하도록 목표속도를 이만큼 더 낮게 취급(km/h). 89차 대안3
+# ("안전마진 휴리스틱")을 시뮬레이션 검증(커브A/B + 직선 154초) 후 확정.
+ROUTE_ENTRY_MARGIN_KPH = 25.0
 
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
@@ -141,6 +145,24 @@ def get_path_after_distance(start_index, coordinates, current_position, distance
             path_after_distance.append(coord2)
 
     return path_after_distance, start_index, closest_point
+
+
+# [84차] route 커브 lookahead 거리 캡을 300m 고정값 대신 v_ego/accel_limit
+# 기반으로 동적 계산(300~600m, 85차에서 500->600 상향 — 120->60km/h
+# 풀커버에 accel=0.70 기준 이론상 필요한 ≈595m를 온전히 커버하기 위함).
+# "assumed_target_kph"는 실제 커브 목표속도가 아니라(그건 carrot_navi_route()의
+# 곡률 계산 이후에야 정해짐 - 이 함수는 그보다 먼저 호출돼야 해서 실제
+# 목표속도를 알 수 없음) 캡 크기 산정용 가정값(흔한 조임 커브 수준)일 뿐이다.
+# 저속(<=60km/h 부근)에서는 항상 min_m(기존 300m)으로 수렴해 회귀 없음,
+# 고속에서만 max_m(600m)까지 확장.
+def compute_route_lookahead_distance(v_ego_kph, accel_limit_mss, min_m=300.0, max_m=600.0,
+                                      assumed_target_kph=30.0):
+  if accel_limit_mss is None or accel_limit_mss <= 0:
+    return min_m
+  v_ego_ms = max(0.0, v_ego_kph) / 3.6
+  v_target_ms = assumed_target_kph / 3.6
+  needed_m = max(0.0, (v_ego_ms ** 2 - v_target_ms ** 2) / (2.0 * accel_limit_mss))
+  return float(min(max_m, max(min_m, needed_m)))
 
 
 def calculate_angle(point1, point2):
@@ -245,7 +267,7 @@ class CarrotMan:
     # 과속방지턱(calculate_current_speed)과 동일한 v_i^2 = v_f^2 + 2ad 물리공식을 커브에도
     # 적용하기 위한 파라미터. AutoNaviSpeedBumpTime/AutoNaviSpeedDecelRate 기본값과 동일하게
     # 맞춰서 사용자가 이미 익숙한 방지턱 감속 '느낌'과 최대한 비슷하게 시작한다.
-    self.vturn_safe_time = 1.0     # 초. 목표속도에 여유있게 미리 도달해 정점까지 유지
+    self.vturn_safe_time = 2.0     # 초. 목표속도에 여유있게 미리 도달해 정점까지 유지 (81차: 1.0s는 실제 차량 감속 반응 램프업 시간 대비 부족하다는 체감 보고로 2.0s 상향, c3-ms-curv 실차검증 대상)
     self.vturn_decel_rate = 1.2    # m/s^2. 방지턱 기본 감속률(AutoNaviSpeedDecelRate=120)과 동일
     # 아래는 모델 프레임 노이즈 제거용 저역통과 필터일 뿐, 감속/가속의 '모양'은 위 물리공식이
     # 만든다. 별도의 '진입/탈출 이벤트' 판정이나 지연(hold) 로직은 두지 않는다 - turnSpeed는
@@ -402,7 +424,10 @@ class CarrotMan:
 
     distance_interval = 10.0
     out_speed = 300
-    path, self.navi_points_start_index, start_point = get_path_after_distance(self.navi_points_start_index, self.navi_points, current_position, 300)
+    # [84차, 85차 500->600 상향] 300m 고정 캡 -> v_ego/accel_limit 기반 동적 캡(300~600m)
+    route_lookahead_m = compute_route_lookahead_distance(self.sm['carState'].vEgo * 3.6,
+                                                          self.carrot_serv.autoNaviSpeedDecelRate)
+    path, self.navi_points_start_index, start_point = get_path_after_distance(self.navi_points_start_index, self.navi_points, current_position, route_lookahead_m)
     relative_coords = []
     if path:
         #relative_coords = gps_to_relative_xy(path, current_position, heading_deg)
@@ -446,13 +471,44 @@ class CarrotMan:
 
             time_delay = self.carrot_serv.autoNaviSpeedCtrlEnd
             time_wait = 0
+            # [82차] route 원복(가속 재개) 측에 vturn과 동일한 "차량 반응 지연 보상용
+            # safe_time 버퍼"를 대칭 적용한다. 진입측(time_delay) 공식은 이미 순수
+            # 물리 도달시간만으로 조기감속을 정확히 계산하고 있어 그대로 둔다 --
+            # [수정] 최초 구현 시 진입측에도 동일하게 +vturn_safe_time을 더했었으나,
+            # 검증 결과 그 진입측 추가 지연(debt)이 실제 커브 구간 통과 중(out_speed가
+            # target에 고정되어 클리핑되는 구간) 고스란히 누적되어 있다가, 아래 원복
+            # 크레딧(+vturn_safe_time)에서 정확히 상쇄되어(부호 반대, 크기 동일) 최종
+            # 출력이 원본과 100% 동일해지는(=패치가 사실상 무효화되는) 버그가
+            # 시뮬레이션(work/test_route_recovery2.py)으로 확인됨 -- 진입측 변경 제거,
+            # 원복측 크레딧만 남김. 원복 시점 판정도 "decel 트리거 직후 첫 지점"이
+            # 아니라 실제로 target_speed가 next_out_speed를 넘어서는(=커브를 실제로
+            # 빠져나가는) 지점으로 엄격화(strict) -- 커브 내부(target==next_out 정체
+            # 구간)에서 조기 발동하지 않도록 함.
+            route_prev_state = None  # 'decel' | 'accel'
             for i in range(len(speeds) - 2, -1, -1):
                 target_speed = speeds[i]
                 next_out_speed = out_speeds[i + 1]
 
                 if target_speed < next_out_speed:
-                  time_delay = max(0, ((v_ego_kph - target_speed) / accel_limit_kmh))
+                  # [91차] route가 vturn보다 사전감속을 더 일찍 시작하도록, 감속 전환
+                  # 시점의 목표속도(target_speed)를 실제보다 ROUTE_ENTRY_MARGIN_KPH만큼
+                  # 더 낮게 취급해 time_delay(=필요 소요시간)를 부풀린다. 최종 채택되는
+                  # target_speed 자체(min(target_speed, max_allowed_speed))는 바꾸지
+                  # 않으므로 커브 정점에서의 목표값은 그대로 -- 오직 "언제부터 감속
+                  # 스케줄을 당겨서 반영하기 시작할지"만 앞당김.
+                  # 시뮬레이션 검증(devnotes work): 커브A(완만한 램프)에서 vturn 실제
+                  # 전환보다 4.26초 먼저 개입, 최종값도 vturn 실측치(73~77)에 근접(79).
+                  # 커브B(급한 램프+교차로)/직선 154초 구간 둘 다 오탐(불필요 조기개입)
+                  # 없음 확인. margin_kph=25는 검증한 20/30 사이 절충값(사용자 결정).
+                  margin_target_speed = max(0.0, target_speed - ROUTE_ENTRY_MARGIN_KPH)
+                  time_delay = max(0, ((v_ego_kph - margin_target_speed) / accel_limit_kmh))
                   time_wait = - time_delay
+                  route_prev_state = 'decel'
+                elif target_speed > next_out_speed and route_prev_state == 'decel':
+                  # 감속 구간이 끝나고 실제로 다시 가속해야 하는 첫 지점(원복 시작) --
+                  # 진입측과 대칭으로 동일 버퍼를 한 번만 얹어 회복을 앞당긴다.
+                  time_wait += self.vturn_safe_time
+                  route_prev_state = 'accel'
 
                 # Calculate time interval for the current segment based on speed
                 time_interval = distance_interval / (next_out_speed / 3.6) if next_out_speed > 0 else 0
@@ -1020,6 +1076,30 @@ class CarrotMan:
     # 여러 지점 중 가장 엄격한(=지금 당장 가장 느려야 하는) 지점이 최종 제약이 된다.
     apex_idx = int(np.argmin(required_speed_kph))
     turnSpeed = float(required_speed_kph[apex_idx])
+
+    # ---- [82차] 원복(가속) 측 대칭 버퍼 ----
+    # 위 safe_dist는 진입(감속) 측에만 적용되는 비대칭 버퍼다 -- "차량이 실제로
+    # 그 감속도까지 도달하는 데 시간이 걸리니 정점보다 safe_time만큼 미리
+    # 도달시키자"는 논리(81차)인데, 가속(원복) 반응도 동일하게 지연이 있으므로
+    # 같은 논리를 대칭 적용한다. lookahead 배열은 항상 전방(미래) 지점만 담고
+    # 있어 "정점을 이미 지난" 지점을 직접 표현할 수 없으므로, 정점을 실제보다
+    # vturn_safe_time(=CS.vEgo 기준 거리)만큼 더 일찍 지난 것으로 가정한
+    # 두 번째 후보를 계산해 -- 이번 프레임이 이미 회복(가속) 추세일 때만 -- 채택한다.
+    # 진입(감속) 경로는 이 블록과 완전히 무관하게 그대로 유지되어 회귀 위험이 없다.
+    accel_lead_dist = max(CS.vEgo, 0.0) * self.vturn_safe_time
+    decel_dist_recovery = np.maximum(lookahead_pos - safe_dist + accel_lead_dist, 0.0)
+    required_speed_mps_recovery = np.sqrt(np.maximum(
+      safe_speed_mps ** 2 + 2 * self.vturn_decel_rate * decel_dist_recovery, 0.0))
+    required_speed_kph_recovery = np.clip(required_speed_mps_recovery * 3.6, 5.0, 250.0)
+    apex_idx_recovery = int(np.argmin(required_speed_kph_recovery))
+    turnSpeed_recovery = float(required_speed_kph_recovery[apex_idx_recovery])
+
+    if turnSpeed > self.vturn_last_speed and turnSpeed_recovery > turnSpeed:
+      # 상승 추세(가속/원복 중)이고, 대칭 버퍼를 적용하면 더 일찍 풀리는(더 높은)
+      # 값이 나올 때만 채택 -- 새 커브가 나타나 다시 조여야 하는 프레임에서는
+      # turnSpeed(진입 계산값)가 그대로 낮게 유지되므로 자동으로 무시된다.
+      turnSpeed = turnSpeed_recovery
+      apex_idx = apex_idx_recovery
 
     # 방향 판단: 실제로 속도를 제한하는 지점 기준. 전방에 유의미한 커브가 없어
     # 해당 지점도 사실상 무제한(커브 없음)이면 근거리 가중합으로 대체한다.
