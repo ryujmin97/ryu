@@ -38,6 +38,11 @@ LaneChangeDirection = log.LaneChangeDirection
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 
 
+def smooth_value(val, prev_val, tau):
+  alpha = 1 - np.exp(-DT_CTRL / tau) if tau > 0 else 1
+  return alpha * val + (1 - alpha) * prev_val
+
+
 class Controls:
   def __init__(self) -> None:
     self.params = Params()
@@ -78,6 +83,17 @@ class Controls:
       self.LaC = LatControlTorque(self.CP, self.CI)
     self.carrot_controls = CarrotControls(self.CP)
 
+    # 97차: state_control()/publish() 내 매 사이클(100Hz) 무제한 Params I/O 캐싱
+    # (lateral_planner.py self.readParams 패턴과 동일 -- 100프레임마다 1회 재조회)
+    self.readParams = 0
+    self._steer_ratio_rate = 0.0
+    self._custom_sr = 0.0
+    self._use_lane_line_curve_speed = 0
+    self._lat_smooth_seconds = 0.0
+    self._steer_actuator_delay_param = 0.0
+    self._speed_from_pcm = 0
+    self._disable_dm = 0
+
   def update(self):
     self.sm.update(15)
     if self.sm.updated["liveCalibration"]:
@@ -89,11 +105,23 @@ class Controls:
   def state_control(self):
     CS = self.sm['carState']
 
+    # 97차: 100Hz 루프 내 Params I/O를 100프레임(약 1초)마다 1회로 캐싱
+    self.readParams -= 1
+    if self.readParams <= 0:
+      self.readParams = 100
+      self._steer_ratio_rate = self.params.get_float("SteerRatioRate") / 100.0
+      self._custom_sr = self.params.get_float("CustomSR") / 10.0
+      self._use_lane_line_curve_speed = self.params.get_int("UseLaneLineCurveSpeed")
+      self._lat_smooth_seconds = self.params.get_float("LatSmoothSec") * 0.01
+      self._steer_actuator_delay_param = self.params.get_float("SteerActuatorDelay") * 0.01
+      self._speed_from_pcm = self.params.get_int("SpeedFromPCM")
+      self._disable_dm = self.params.get_int("DisableDM")
+
     # Update VehicleModel
     lp = self.sm['liveParameters']
     x = max(lp.stiffnessFactor, 0.1)
-    sr = max(lp.steerRatio, 0.1) * self.params.get_float("SteerRatioRate") / 100.0
-    custom_sr = self.params.get_float("CustomSR") / 10.0
+    sr = max(lp.steerRatio, 0.1) * self._steer_ratio_rate
+    custom_sr = self._custom_sr
     sr = max(custom_sr if custom_sr > 1.0 else sr, 0.1)
     self.VM.update_params(x, sr)
 
@@ -150,15 +178,11 @@ class Controls:
     # Steering PID loop and lateral MPC
     lat_plan = self.sm['lateralPlan']
     curve_speed_abs = abs(self.sm['carrotMan'].vTurnSpeed)
-    self.lanefull_mode_enabled = (lat_plan.useLaneLines and curve_speed_abs > self.params.get_int("UseLaneLineCurveSpeed"))
-    lat_smooth_seconds = self.params.get_float("LatSmoothSec") * 0.01
-    steer_actuator_delay = self.params.get_float("SteerActuatorDelay") * 0.01
+    self.lanefull_mode_enabled = (lat_plan.useLaneLines and curve_speed_abs > self._use_lane_line_curve_speed)
+    lat_smooth_seconds = self._lat_smooth_seconds
+    steer_actuator_delay = self._steer_actuator_delay_param
     if steer_actuator_delay == 0.0:
       steer_actuator_delay = self.sm['liveDelay'].lateralDelay 
-    
-    def smooth_value(val, prev_val, tau):
-      alpha = 1 - np.exp(-DT_CTRL / tau) if tau > 0 else 1
-      return alpha * val + (1 - alpha) * prev_val
 
     if not CC.latActive:
       new_desired_curvature = self.curvature
@@ -226,7 +250,7 @@ class Controls:
 
     lp = self.sm['longitudinalPlan']
     if self.CP.pcmCruise:
-      speed_from_pcm = self.params.get_int("SpeedFromPCM")
+      speed_from_pcm = self._speed_from_pcm
       if speed_from_pcm == 1: #toyota
         hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
       elif speed_from_pcm == 2:
@@ -302,7 +326,7 @@ class Controls:
     cs.upAccelCmd = float(self.LoC.pid.p)
     cs.uiAccelCmd = float(self.LoC.pid.i)
     cs.ufAccelCmd = float(self.LoC.pid.f)
-    cs.forceDecel = bool((self.sm['driverMonitoringState'].awarenessStatus < 0. and self.params.get_int("DisableDM") == 0) or
+    cs.forceDecel = bool((self.sm['driverMonitoringState'].awarenessStatus < 0. and self._disable_dm == 0) or
                          (self.sm['selfdriveState'].state == State.softDisabling))
 
     lat_tuning = self.CP.lateralTuning.which()

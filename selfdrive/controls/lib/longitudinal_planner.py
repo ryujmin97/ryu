@@ -112,6 +112,11 @@ class LongitudinalPlanner:
     self.v_cruise_kph = 0.0
 
     self.params = Params()
+    # 97차: update()(20Hz) 내 매 사이클 무제한 Params I/O 캐싱 -- 100프레임(5s)마다 재조회
+    self.readParams = 0
+    self._comma_long_acc = 0
+    self._long_actuator_delay = 0.0
+    self._v_ego_stopping = 0.0
 
   @staticmethod
   def parse_model(model_msg):
@@ -134,6 +139,13 @@ class LongitudinalPlanner:
     return x, v, a, j, throttle_prob
 
   def update(self, sm, carrot):
+    self.readParams -= 1
+    if self.readParams <= 0:
+      self.readParams = 100
+      self._comma_long_acc = self.params.get_int("CommaLongAcc")
+      self._long_actuator_delay = self.params.get_float("LongActuatorDelay") * 0.01
+      self._v_ego_stopping = self.params.get_float("VEgoStopping") * 0.01
+
     self.mpc.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
 
     if len(sm['carControl'].orientationNED) == 3:
@@ -189,7 +201,7 @@ class LongitudinalPlanner:
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
     x, v, a, j, throttle_prob = self.parse_model(sm['modelV2'])
     # Don't clip at low speeds since throttle_prob doesn't account for creep
-    if self.params.get_int("CommaLongAcc") > 0:
+    if self._comma_long_acc > 0:
       self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED
     else:
       self.allow_throttle = True
@@ -227,8 +239,8 @@ class LongitudinalPlanner:
     self.a_desired = float(np.interp(self.dt, CONTROL_N_T_IDX, self.a_desired_trajectory))
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.a_desired + a_prev) / 2.0
 
-    longitudinalActuatorDelay = self.params.get_float("LongActuatorDelay")*0.01
-    vEgoStopping = self.params.get_float("VEgoStopping") * 0.01
+    longitudinalActuatorDelay = self._long_actuator_delay
+    vEgoStopping = self._v_ego_stopping
     action_t =  longitudinalActuatorDelay + DT_MDL
 
     output_a_target_mpc, output_should_stop_mpc, output_v_target_mpc, _ = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,

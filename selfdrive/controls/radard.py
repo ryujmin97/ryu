@@ -4,7 +4,6 @@ import numpy as np
 from collections import deque
 from typing import Any
 import heapq
-import copy
 
 import capnp
 from cereal import messaging, log, car
@@ -711,6 +710,27 @@ class LeadBlend:
     return blended
 
 
+def _lead_cand_ok(ld):
+  # 97차: compute_leads() 20Hz 사이클마다 재생성되던 내부함수를 모듈레벨로 이동
+  return (ld.get('vLead', 0) > 2 and
+          abs(ld.get('dPath', 0)) < 4.2 and
+          ld.get('dRel', 0) > 2)
+
+
+def _pick_two_with_gap(cands, min_gap=5.0):
+  xs = sorted((ld for ld in cands if _lead_cand_ok(ld)), key=lambda d: d['dRel'])
+  if not xs:
+    return []
+  first = xs[0]
+  second = None
+  for ld in xs[1:]:
+    # 5m 이상 떨어진 후보만 허용 (>= 5.0)
+    if (ld['dRel'] - first['dRel']) >= min_gap:
+      second = ld
+      break
+  return [first] if second is None else [first, second]
+
+
 class RadarD:
   def __init__(self, delay: float = 0.0):
     self.current_time = 0.0
@@ -735,6 +755,9 @@ class RadarD:
     self.enable_corner_radar = self.params.get_int("EnableCornerRadar")
     self.radar_lat_factor = 0.0
 
+    # 97차: update()(20Hz) 내 매 사이클 무제한 Params I/O 캐싱 -- 100프레임(5s)마다 재조회
+    self.readParams = 0
+
     self.radar_detected = False
 
     self._corner_lat_hist = {
@@ -748,10 +771,13 @@ class RadarD:
     self.ready = sm.seen['modelV2']
     self.current_time = 1e-9*max(sm.logMonoTime.values())
 
-    self.enable_radar_tracks = self.params.get_int("EnableRadarTracks")
-    self.enable_corner_radar = self.params.get_int("EnableCornerRadar")
-    self.radar_lat_factor = self.params.get_float("RadarLatFactor") * 0.01
-    self.radar_reaction_factor = self.params.get_float("RadarReactionFactor") * 0.01
+    self.readParams -= 1
+    if self.readParams <= 0:
+      self.readParams = 100
+      self.enable_radar_tracks = self.params.get_int("EnableRadarTracks")
+      self.enable_corner_radar = self.params.get_int("EnableCornerRadar")
+      self.radar_lat_factor = self.params.get_float("RadarLatFactor") * 0.01
+      self.radar_reaction_factor = self.params.get_float("RadarReactionFactor") * 0.01
     self.detect_cut_in = self.radar_lat_factor > 0
 
     leads_v3 = sm['modelV2'].leadsV3
@@ -978,31 +1004,13 @@ class RadarD:
             default=None
         )
         if self.leadTwo is not None:
-          self.leadTwo = copy.deepcopy(self.leadTwo)
+          self.leadTwo = self.leadTwo.copy()  # flat dict라 deepcopy 불필요 (97차)
           #gap = self.leadTwo['dRel'] - self.radar_state.leadOne.dRel
           #offset = 3.0 + min(gap * 0.2, 10)
           #self.leadTwo['dRel'] = self.radar_state.leadOne.dRel + offset
           self.leadTwo['dRel'] = max(self.radar_state.leadOne.dRel + 3.0, self.leadTwo['dRel'] - 8.0) # lead+1 차를 뒤로 8M후퇴하여, mpc에서  감자하도록함.. 최소 lead보다 3M앞에 위치하도록
     else:
       self.leadCenter = None
-
-    def _ok(ld):
-        return (ld.get('vLead', 0) > 2 and
-                abs(ld.get('dPath', 0)) < 4.2 and
-                ld.get('dRel', 0) > 2)
-
-    def _pick_two_with_gap(cands, min_gap=5.0):
-        xs = sorted((ld for ld in cands if _ok(ld)), key=lambda d: d['dRel'])
-        if not xs:
-            return []
-        first = xs[0]
-        second = None
-        for ld in xs[1:]:
-            # 5m 이상 떨어진 후보만 허용 (>= 5.0)
-            if (ld['dRel'] - first['dRel']) >= min_gap:
-                second = ld
-                break
-        return [first] if second is None else [first, second]
 
     self.radar_state.leadsLeft2  = _pick_two_with_gap(left_list,  min_gap=5.0)
     self.radar_state.leadsRight2 = _pick_two_with_gap(right_list, min_gap=5.0)
