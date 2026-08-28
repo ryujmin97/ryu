@@ -309,6 +309,31 @@ class CarrotMan:
     self.vturn_decel_rc = 0.15
     self.vturn_accel_rc = 0.15
     self.curvatureFilter = MyMovingAverage(20)
+
+    # [99차 발견 -> 100차 패치, 101차 순서수정] carrot_navi_route()/
+    # carrot_curve_speed_params()가 20Hz 루프(broadcast_version_info)에서
+    # 매 사이클 무캐싱으로 읽던 Params 3개(IsOnroad, AutoCurveSpeedFactor,
+    # AutoCurveSpeedAggressiveness)를 controlsd.py/radard.py/
+    # longitudinal_planner.py(98차)와 동일한 "readParams 카운트다운" 패턴으로
+    # 통일 -- 100프레임(20Hz 기준 5s)마다 1회 재조회. 최초 1회는 즉시 읽어
+    # 기본값을 채워둔다(readParams=0으로 시작해 첫 호출에서 바로 갱신됨).
+    #
+    # [101차 수정] 이 블록은 반드시 아래 self.carrot_curve_speed_params()
+    # 호출보다 먼저 와야 한다 -- 그 함수가 self._auto_curve_speed_factor /
+    # self._auto_curve_speed_aggressiveness를 그대로 참조한다(carrot_curve_
+    # speed_params() 정의부 참고). 100차 패치는 이 캐시 초기화 블록을
+    # __init__ 맨 끝(self.is_metric 이후)에 둔 채로 놔둬서, 이미 그 위쪽에
+    # 있던 carrot_curve_speed_params() 호출이 아직 존재하지 않는 캐시
+    # 필드를 참조 -> AttributeError로 carrot_man이 __init__ 도중 즉시
+    # 죽는 버그가 발생했다. 이 죽음은 cloudlog가 아직 설정되기 전(또는
+    # 그와 매우 가까운 시점)에 일어나 rlog/qlog에 Python traceback이
+    # 전혀 남지 않았고, managerState에도 exitCode=1만 반복 기록되어
+    # 원인 추적이 어려웠다(devnotes FINDINGS.md "101차" 참고).
+    self.readParams = 0
+    self._is_onroad_cached = self.params.get_bool("IsOnroad")
+    self._auto_curve_speed_factor = self.params.get_int("AutoCurveSpeedFactor") * 0.01
+    self._auto_curve_speed_aggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness") * 0.01
+
     self.carrot_curve_speed_params()
 
     self.carrot_zmq_thread = threading.Thread(target=self.carrot_cmd_zmq, args=[])
@@ -337,18 +362,6 @@ class CarrotMan:
     self._last_rgdata_timestamp_ms = 0
 
     self.is_metric = self.params.get_bool("IsMetric")
-
-    # [99차 발견 -> 100차 패치] carrot_navi_route()/carrot_curve_speed_params()가
-    # 20Hz 루프(broadcast_version_info)에서 매 사이클 무캐싱으로 읽던
-    # Params 3개(IsOnroad, AutoCurveSpeedFactor, AutoCurveSpeedAggressiveness)를
-    # controlsd.py/radard.py/longitudinal_planner.py(98차)와 동일한
-    # "readParams 카운트다운" 패턴으로 통일 -- 100프레임(20Hz 기준 5s)마다 1회
-    # 재조회. 최초 1회는 즉시 읽어 기본값을 채워둔다(readParams=0으로 시작해
-    # 첫 호출에서 바로 갱신됨).
-    self.readParams = 0
-    self._is_onroad_cached = self.params.get_bool("IsOnroad")
-    self._auto_curve_speed_factor = self.params.get_int("AutoCurveSpeedFactor") * 0.01
-    self._auto_curve_speed_aggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness") * 0.01
 
   def _refresh_cached_params(self):
     # [99차/100차] 20Hz 루프 내 Params I/O 캐싱 -- 98차(controlsd.py 등)와
