@@ -196,6 +196,31 @@ LOW_SPEED_STRONG_DECEL_V_EGO_GATE = 30.0 / 3.6   # m/s (~30km/h) : 이 속도 �
 LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH = -2.5      # m/s^2 : 앞차 실측 감속이 이보다 강하면(더 음수) 적용
 
 
+# 2026-08-29 6님 제보 대응 (WIP.md 116/117차, FINDINGS.md 참고): "저속(<=40km/h
+# 이하)에서 앞차가 멀어질 때 자차가 너무 급하게 재가속하면, 이후 앞차가 다시
+# 감속/정지할 때 자차가 급하게 반응하게 되는 것 아니냐"는 가설 대응. 위
+# margin_accel_weight()/ttc_accel_weight()는 둘 다 "위험(closing) 방향" 감쇠만
+# 있고, 앞차가 멀어지는(v_lead>v_ego) 방향엔 damping이 전혀 없어 a_lead가
+# 감쇠 없이 그대로 MPC 타깃에 반영됨 -- 이게 원인 지점.
+# 대응: 저속 + 이미 desired_distance보다 충분히 벌어진(gap_ratio, 기존 dist_w
+# 경계 MARGIN_ACCEL_GATE_FULL 재사용) 상태에서 앞차가 강하게 가속(멀어짐)할
+# 때만 a_lead에 상한을 건다. "정지 후 출발 가속 약화"(45차) 재발 방지를 위해
+# launch bypass 중엔 게이트 자체가 항상 닫힘(gap_open_apply=False).
+# 116차 합성검증(F, toolkit/sim_gap_open_damping.py)에서 게이트를 하드클램프로
+# 그대로 켜고 끄면 진입/해제 순간 a_lead에 최대 1.5 m/s^2 단차가 발생함을
+# 확인 -- 39차(LEAD_ACCEL_WEIGHT_RISE_RATE)와 동일한 패턴으로, 캡을 직접
+# 하드클램프하는 대신 "캡이 얼마나 섞여 들어가는지"를 나타내는 블렌드 weight를
+# 도입해 그 weight의 사이클당 변화폭을 제한한다(진입/해제 양방향 모두 완만화 --
+# 39차는 rising(위험해지는) 방향만 제한했지만, 이 방안은 위험(closing) 신호가
+# 아니라 "가속 상한"이므로 켜질 때/꺼질 때 둘 다 단차 방지가 목적).
+LOW_SPEED_GAP_OPEN_V_EGO_GATE = 40.0 / 3.6        # m/s (~40km/h) : 이 속도 이하에서만 적용
+LOW_SPEED_GAP_OPEN_A_LEAD_THRESH = 1.0            # m/s^2 : 앞차 실측 가속이 이보다 강하면(멀어짐) 적용
+LOW_SPEED_GAP_OPEN_ACCEL_CAP = 0.5                # m/s^2 : 게이트 진입 시 a_lead 상한
+LOW_SPEED_GAP_OPEN_MARGIN_RATIO = MARGIN_ACCEL_GATE_FULL  # 1.5, 기존 dist_w 경계 재사용
+LOW_SPEED_GAP_OPEN_WEIGHT_RISE_RATE = 1.0         # 1/s : 캡 블렌드 weight가 0<->1로 바뀌는 데
+                                                   # 최소 1.0초 걸리도록 제한(진입/해제 모두)
+
+
 def ttc_accel_weight(dRel, v_ego, v_lead):
   closing = v_ego - v_lead
   if closing <= 0.1:
@@ -671,6 +696,10 @@ class LongitudinalMpc:
     # lead-accel damping weight rise-rate limit state (see LEAD_ACCEL_WEIGHT_RISE_RATE below)
     self._lead_accel_weight_prev = 1.0   # 직전 사이클 weight -- 초기값 1.0(무감쇠)이 안전측 기본값
 
+    # 116/117차: 저속 gap-opening a_lead 캡 블렌드 weight rise-rate 제한 상태
+    # (see LOW_SPEED_GAP_OPEN_* above) -- 초기값 0.0(캡 미적용)이 안전측 기본값
+    self._gap_open_cap_weight_prev = 0.0
+
     # launch bypass state (see LAUNCH_BYPASS_* above, FINDINGS.md 45차)
     self._launch_bypass_active = False   # True인 동안 ttc_accel_weight()(38차) 완전 우회
 
@@ -866,6 +895,38 @@ class LongitudinalMpc:
         w = min(w, self._lead_accel_weight_prev + LEAD_ACCEL_WEIGHT_RISE_RATE * self.dt)
       self._lead_accel_weight_prev = w
       a_lead *= w
+
+      # 116/117차: 저속 gap-opening a_lead 캡 (위 LOW_SPEED_GAP_OPEN_* 주석
+      # 참고). gap_ratio는 위 dist_w와 동일한 x_lead/desired_distance 비율을
+      # 재사용하되, desired_distance<=1.0(사실상 미정의)이면 게이트를 열지
+      # 않는다.
+      gap_ratio = (x_lead / self.desired_distance) if self.desired_distance > 1.0 else 0.0
+      gap_open_apply = (
+        v_ego <= LOW_SPEED_GAP_OPEN_V_EGO_GATE
+        and a_lead >= LOW_SPEED_GAP_OPEN_A_LEAD_THRESH
+        and (not self._launch_bypass_active)
+        and gap_ratio >= LOW_SPEED_GAP_OPEN_MARGIN_RATIO
+      )
+      cap_target = 1.0 if gap_open_apply else 0.0
+      if self._launch_bypass_active:
+        # 45차와 동일 원칙: bypass 중엔 이 rise-rate 제한도 함께 우회한다.
+        # gap_open_apply가 bypass 중엔 항상 False라 cap_target은 이미
+        # 0.0이지만, 직전 사이클의 완만화가 이어지며 잔여 캡이 남아있지
+        # 않도록 즉시 0.0으로 강제한다(defense-in-depth, 출발 가속 약화
+        # 재발 방지).
+        cap_w = cap_target
+      elif cap_target > self._gap_open_cap_weight_prev:
+        cap_w = min(cap_target, self._gap_open_cap_weight_prev + LOW_SPEED_GAP_OPEN_WEIGHT_RISE_RATE * self.dt)
+      elif cap_target < self._gap_open_cap_weight_prev:
+        cap_w = max(cap_target, self._gap_open_cap_weight_prev - LOW_SPEED_GAP_OPEN_WEIGHT_RISE_RATE * self.dt)
+      else:
+        cap_w = cap_target
+      self._gap_open_cap_weight_prev = cap_w
+      if cap_w > 0.0:
+        # cap_w=0이면 원본 a_lead 그대로, cap_w=1이면 완전 클램프. 그
+        # 사이(0<cap_w<1)는 두 값을 선형 블렌드해 진입/해제 순간의 단차를
+        # 없앤다.
+        a_lead = a_lead * (1.0 - cap_w) + min(a_lead, LOW_SPEED_GAP_OPEN_ACCEL_CAP) * cap_w
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0
@@ -875,6 +936,10 @@ class LongitudinalMpc:
       # 리드가 없는 사이클엔 이전 리드와 무관하므로 다음 리드 재획득 시 불필요한
       # rise-rate 제한이 이어지지 않도록 리셋(안전측 기본값 1.0으로).
       self._lead_accel_weight_prev = 1.0
+      # 116/117차: 마찬가지로 gap-open 캡 블렌드 weight도 안전측 기본값(캡
+      # 미적용, 0.0)으로 리셋 -- 리드 재획득 시 직전 리드의 잔여 캡이 이어지지
+      # 않도록 한다.
+      self._gap_open_cap_weight_prev = 0.0
       if is_lead0:
         # 리드가 없으면 위험 신호도 없음 -- 부스트 게이트가 stale True에
         # 걸려 있지 않도록 안전측(무위험)으로 리셋.
