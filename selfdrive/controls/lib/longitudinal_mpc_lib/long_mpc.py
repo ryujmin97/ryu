@@ -463,6 +463,21 @@ RADAR_HANDOFF_JERK_BOOST_S = 4.0            # s : 방안I 전용 hard-hold 유�
                                              #     DISCONTINUITY_JERK_COST_BOOST_S=1.0과 별개)
 RADAR_HANDOFF_JERK_BOOST_RELEASE_RATE = 100.0  # cost/s : hard-hold 종료 후 base까지 이 속도로 선형 감쇠
 
+# 109차(방안 옵션1, FINDINGS.md 106~108차 실측 30라우트 검증 근거):
+# 'discontinuity_lc'(75-76차, 차선변경 중 dRel discontinuity)는 blinker가
+# 켜진 채로 vision->radar 전환이 겹치는 구간이라, danger override(TTC)
+# 판정 자체가 그 전환 프레임의 찰나적 노이즈에 걸려 boost가 조기에
+# force_revert(즉시 base 복귀)되는 사례가 108차 30라우트 검증에서 3건
+# 확인됨(전부 blinker=True, 그 중 947fbb7dc6 t=2685.72 min_aEgo=-3.40이
+# 106차가 화면녹화로 확인한 원본 사례). 'handoff'(차선변경 무관)는 이
+# 문제가 없었으므로(108차: 2건 모두 저속 정상범위) 대상에서 제외 --
+# danger_active가 이 confirm 시간만큼 "연속으로" 유지될 때만 실제
+# force_revert를 인정한다(찰나성 튐은 흡수, 진짜 위험은 confirm 시간
+# 이내에 대부분 재확정되므로 안전마진 희생은 미미할 것으로 예상 --
+# 실차검증 전이므로 값은 보수적으로 짧게 설정, NEEDS_VALIDATION).
+LANE_CHANGE_DISCONTINUITY_DANGER_CONFIRM_S = 0.25  # s : discontinuity_lc 전용, 이 시간 이상
+                                                    #     danger_active가 연속 유지돼야 force_revert 인정
+
 
 def gen_long_model():
   model = AcadosModel()
@@ -649,6 +664,9 @@ class LongitudinalMpc:
     # (위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고).
     self._discontinuity_trigger_source = None   # 'discontinuity' | 'discontinuity_lc' | 'handoff' | None
     self._handoff_release_value = None          # 방안I 전용 release-rate 감쇠 중인 현재값
+    # 109차(옵션1): 'discontinuity_lc' 전용 danger confirm-hold 상태
+    # (위 LANE_CHANGE_DISCONTINUITY_DANGER_CONFIRM_S 주석 참고)
+    self._lc_danger_confirm_timer = 0.0         # danger_active가 연속으로 유지된 누적시간
 
     # 72차(방안 I): 레이더 락온 전환(vision->radar handoff) 프레임의 vRel
     # 불연속 감지용 상태 (위 RADAR_HANDOFF_VREL_JUMP_THRESH 주석 참고)
@@ -960,6 +978,9 @@ class LongitudinalMpc:
           self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
           self._discontinuity_trigger_source = 'discontinuity'
         self._handoff_release_value = None
+        # 109차(옵션1): 새 트리거는 확정 이력을 새로 시작 -- 이전 트리거에서
+        # 누적됐던 confirm 타이머가 이번 트리거에 그대로 이어지지 않게 한다.
+        self._lc_danger_confirm_timer = 0.0
 
       if self._vision_dRel_prev is not None:
         raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
@@ -1199,15 +1220,41 @@ class LongitudinalMpc:
       #     최저점(트리거 후 1.4~1.65s) 전에 소진돼 무력화"되는 한계를
       #     76차가 handoff와 동일한 4.0s+release-rate로 해소(FINDINGS.md
       #     76차 참고).
+      #   - 109차(옵션1): 위 둘 중 'discontinuity_lc'만 danger_active를
+      #     즉시 신뢰하지 않고 LANE_CHANGE_DISCONTINUITY_DANGER_CONFIRM_S
+      #     동안 연속으로 유지돼야 force_revert를 인정한다(위 상수 주석/
+      #     FINDINGS.md 108~109차 참고). 'handoff'는 기존과 동일하게
+      #     danger_active 즉시 반영(회귀 없음, 108차 실측 2건 모두 정상범위
+      #     였고 confirm 대상에 포함될 근거가 없었음).
       is_handoff_source = (self._discontinuity_trigger_source in ('handoff', 'discontinuity_lc'))
       boost_gate_ok = (self._discontinuity_jerk_boost_timer > 0.0) and not self._lead0_danger_active
       if not is_handoff_source:
         boost_gate_ok = boost_gate_ok and (frac <= 0.0)
 
+      if self._discontinuity_trigger_source == 'discontinuity_lc':
+        if self._lead0_danger_active:
+          self._lc_danger_confirm_timer += self.dt
+        else:
+          self._lc_danger_confirm_timer = 0.0
+        lc_danger_confirmed = self._lc_danger_confirm_timer >= LANE_CHANGE_DISCONTINUITY_DANGER_CONFIRM_S
+        # confirm 전에는 danger_active 단독으로 게이트를 막지 않는다(단,
+        # hard-hold 타이머 자체가 소진됐거나 frac_independent가 아닌 등
+        # 다른 조건은 그대로 적용) -- boost_gate_ok를 danger_active 미확정
+        # 상태에서 복구.
+        if self._lead0_danger_active and not lc_danger_confirmed:
+          boost_gate_ok = (self._discontinuity_jerk_boost_timer > 0.0)
+      else:
+        lc_danger_confirmed = False
+        self._lc_danger_confirm_timer = 0.0
+
       if is_handoff_source:
         # release-rate 감쇠 중에도 danger override가 뜨면 즉시 base로
         # 강제복귀(원본 설계 원칙 유지) -- frac은 이 소스엔 무관.
-        force_revert = self._lead0_danger_active
+        # 단, 'discontinuity_lc'는 위에서 confirm된 경우에만 force_revert.
+        if self._discontinuity_trigger_source == 'discontinuity_lc':
+          force_revert = lc_danger_confirmed
+        else:
+          force_revert = self._lead0_danger_active
         if boost_gate_ok:
           self.a_change_cost = DISCONTINUITY_JERK_COST_BOOST
           self._handoff_release_value = DISCONTINUITY_JERK_COST_BOOST
