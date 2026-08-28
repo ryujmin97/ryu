@@ -186,7 +186,14 @@ LAUNCH_BYPASS_EXIT_V_EGO = 5.0   # m/s : 정차에서 출발한 뒤 이 속도�
 # 주행)에서는 이 분기 자체를 안 타므로 patch 이전과 동작이 100% 동일해야
 # 한다 -- 회귀 검증 시 v_ego > 게이트값 시나리오는 diff 0을 기준으로 확인.
 LOW_SPEED_STRONG_DECEL_V_EGO_GATE = 30.0 / 3.6   # m/s (~30km/h) : 이 속도 이하에서만 적용
-LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH = -1.8      # m/s^2 : 앞차 실측 감속이 이보다 강하면(더 음수) 적용
+# 112차(체크포인트, FINDINGS.md 참고): "저속주행중 앞차 서행/정지시 급감속"
+# 3라우트 제보 분석 결과, 라우트1(t≈1940)에서 aLeadK=-2.07(평범한 일상 제동
+# 강도)에도 이 게이트가 발동해 w=1.0이 rise-rate 우회로 즉시 적용되며 과잉
+# 반응으로 이어짐을 확인 -- 원래 목적(정체구간 재출현 붕끗 대응, 58차2번)에
+# 맞게 "일상 제동"이 아닌 "정말 강한 감속"만 걸리도록 문턱을 -1.8에서 3라우트
+# 실측 기반으로 -2.5까지 강화. 라우트2/3(aLeadK -4.2/-2.0대, vEgo>30km/h)은
+# 이 게이트 밖(TTC 경로)이라 이 값 변경과 무관.
+LOW_SPEED_STRONG_DECEL_A_LEAD_THRESH = -2.5      # m/s^2 : 앞차 실측 감속이 이보다 강하면(더 음수) 적용
 
 
 def ttc_accel_weight(dRel, v_ego, v_lead):
@@ -463,6 +470,17 @@ RADAR_HANDOFF_JERK_BOOST_S = 4.0            # s : 방안I 전용 hard-hold 유�
                                              #     DISCONTINUITY_JERK_COST_BOOST_S=1.0과 별개)
 RADAR_HANDOFF_JERK_BOOST_RELEASE_RATE = 100.0  # cost/s : hard-hold 종료 후 base까지 이 속도로 선형 감쇠
 
+# 112차(체크포인트 방향 합의, FINDINGS.md 참고): 라우트1 분석 결과 -- 사용자와
+# rise-rate 제한 되살리기(원안 B)는 기각하기로 합의(low_speed_strong_lead_decel이
+# lead0_danger_now에 묶여 TTC-danger와 동급 취급되므로, 여기 rise-rate를 다시
+# 걸면 58차 원래 취지/정체 붕끗 즉시반응을 부분 무력화). 대신 목표(aLeadK 반영량,
+# w=1.0)는 그대로 두고 "도달 과정"(MPC jerk cost)만 완만화하는 방향으로
+# discontinuity_jerk_boost를 신규 트리거 소스 'low_speed_strong_decel'로 확장.
+# hold/release 값은 신규 튜닝 없이 방안I(handoff)의 검증된 값을 그대로 재사용
+# (danger override 성격이 유사 -- 정지/서행 앞차의 진짜 상태가 확정되는 것뿐,
+# 새 미확인 위험이 아니라는 점에서 방안I 판단 논리와 동일). is_handoff_source에
+# 포함시켜 release-rate 완만 감쇠 경로를 handoff/discontinuity_lc와 동일하게 탐.
+
 # 109차(방안 옵션1, FINDINGS.md 106~108차 실측 30라우트 검증 근거):
 # 'discontinuity_lc'(75-76차, 차선변경 중 dRel discontinuity)는 blinker가
 # 켜진 채로 vision->radar 전환이 겹치는 구간이라, danger override(TTC)
@@ -662,8 +680,12 @@ class LongitudinalMpc:
     self._lead0_danger_active = False           # process_lead(leadOne)의 danger override/저속강한감속 최신 상태
     # 73차: 트리거 소스별 hard-hold 유지시간/게이트 분리를 위한 상태
     # (위 RADAR_HANDOFF_JERK_BOOST_S 주석 참고).
-    self._discontinuity_trigger_source = None   # 'discontinuity' | 'discontinuity_lc' | 'handoff' | None
+    self._discontinuity_trigger_source = None   # 'discontinuity' | 'discontinuity_lc' | 'handoff' |
+                                                 # 'low_speed_strong_decel'(112차) | None
     self._handoff_release_value = None          # 방안I 전용 release-rate 감쇠 중인 현재값
+    # 112차: low_speed_strong_lead_decel 신규 진입(엣지) 검출용 -- 매 사이클
+    # 재트리거되지 않도록 이전 프레임 상태를 기억한다.
+    self._prev_low_speed_strong_lead_decel = False
     # 109차(옵션1): 'discontinuity_lc' 전용 danger confirm-hold 상태
     # (위 LANE_CHANGE_DISCONTINUITY_DANGER_CONFIRM_S 주석 참고)
     self._lc_danger_confirm_timer = 0.0         # danger_active가 연속으로 유지된 누적시간
@@ -815,6 +837,18 @@ class LongitudinalMpc:
         # 67차(방안G)가 a_change_cost 부스트 게이트에서 참조하는 최신 위험
         # 판정 -- leadOne 호출 시에만 갱신(leadTwo는 부스트와 무관).
         self._lead0_danger_active = lead0_danger_now
+        # 112차: low_speed_strong_lead_decel 신규 진입(False->True 엣지)에서
+        # discontinuity_jerk_boost를 'low_speed_strong_decel' 소스로 arm --
+        # w=1.0(무감쇠) 자체는 그대로 두고, MPC 도달 과정(jerk cost)만
+        # handoff와 동일한 hold+release로 완만화(위 RADAR_HANDOFF_JERK_BOOST_S
+        # 주석 참고). 이미 부스트 진행 중(다른 소스)인 경우는 덮어쓰지 않아
+        # 기존 discontinuity/discontinuity_lc/handoff 트리거를 방해하지 않음.
+        if (low_speed_strong_lead_decel and not self._prev_low_speed_strong_lead_decel
+            and self._discontinuity_jerk_boost_timer <= 0.0):
+          self._discontinuity_jerk_boost_timer = RADAR_HANDOFF_JERK_BOOST_S
+          self._discontinuity_trigger_source = 'low_speed_strong_decel'
+          self._handoff_release_value = None
+        self._prev_low_speed_strong_lead_decel = low_speed_strong_lead_decel
       if lead0_danger_now:
         # 실제 위험(TTC<=2.5s, radard LeadBlend danger_hold와 동일 임계값) 또는
         # 저속+앞차 강한감속이면 rise-rate 제한 없이 즉시 무감쇠 -- 안전 반응을
@@ -845,6 +879,10 @@ class LongitudinalMpc:
         # 리드가 없으면 위험 신호도 없음 -- 부스트 게이트가 stale True에
         # 걸려 있지 않도록 안전측(무위험)으로 리셋.
         self._lead0_danger_active = False
+        # 112차: 리드 소실 시 엣지 상태도 함께 리셋 -- 다음 리드 재획득 시
+        # low_speed_strong_lead_decel이 True로 시작해도(재획득 즉시 강한
+        # 감속 관측) 정상적으로 신규 엣지로 인식되게 한다.
+        self._prev_low_speed_strong_lead_decel = False
 
     # MPC will not converge if immediate crash is expected
     # Clip lead distance to what is still possible to brake for
@@ -1226,7 +1264,14 @@ class LongitudinalMpc:
       #     FINDINGS.md 108~109차 참고). 'handoff'는 기존과 동일하게
       #     danger_active 즉시 반영(회귀 없음, 108차 실측 2건 모두 정상범위
       #     였고 confirm 대상에 포함될 근거가 없었음).
-      is_handoff_source = (self._discontinuity_trigger_source in ('handoff', 'discontinuity_lc'))
+      #   - 'low_speed_strong_decel'(112차): 'handoff'와 동일하게 danger_active
+      #     즉시 반영(confirm 대상 아님) -- 이 소스 자체가 이미
+      #     low_speed_strong_lead_decel(=lead0_danger_now 일부)에서만 arm되므로
+      #     danger_active가 꺼지는 시점이 곧 이 위험판정 자체가 해제되는
+      #     시점과 동일해 confirm으로 얻을 실익이 없음(discontinuity_lc처럼
+      #     vision->radar 전환 노이즈에 걸리는 구조가 아님).
+      is_handoff_source = (self._discontinuity_trigger_source in
+                            ('handoff', 'discontinuity_lc', 'low_speed_strong_decel'))
       boost_gate_ok = (self._discontinuity_jerk_boost_timer > 0.0) and not self._lead0_danger_active
       if not is_handoff_source:
         boost_gate_ok = boost_gate_ok and (frac <= 0.0)
