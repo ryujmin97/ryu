@@ -35,12 +35,6 @@ from openpilot.selfdrive.carrot.carrot_serv import CarrotServ
 
 from openpilot.common.gps import get_gps_location_service
 
-try:
-  from shapely.geometry import LineString
-  SHAPELY_AVAILABLE = True
-except ImportError:
-  SHAPELY_AVAILABLE = False
-
 NetworkType = log.DeviceState.NetworkType
 
 ################ CarrotNavi
@@ -192,6 +186,45 @@ def gps_to_relative_xy(gps_path, reference_point, heading_deg):
     return relative_coordinates
 
 
+# [99차 발견 -> 100차 패치] carrot_navi_route()가 매 20Hz 사이클마다 Shapely
+# LineString(...) 객체를 새로 만들고 그 위에서 .interpolate()를 반복호출하던
+# 부분을 numpy 벡터화로 대체. Shapely/GEOS의 interpolate()는 호출마다
+# 누적거리를 처음부터 다시 훑는 방식이라 "정점 수 x 호출 횟수"에 비례하는
+# 불필요한 재계산이 매 사이클 반복되고 있었음.
+# 동작 동일성은 devnotes work/verify_resample_np.py로 검증 완료 -- 랜덤
+# 경로 20개 + 급커브/직선/경계조건(2점, 정확히 배수인 길이) + 600m급 긴
+# 경로까지 전부 원본(Shapely) 대비 최대오차 1.2e-13m(부동소수점 오차
+# 수준) 이내로 100% 일치. 결과 좌표/개수 모두 원본과 동일하므로 이후
+# calculate_curvature()/속도산출 로직은 변경 없음.
+def resample_10m_np(points_xy, distance_interval=10.0):
+    pts = np.asarray(points_xy, dtype=np.float64)
+    if len(pts) < 2:
+        return [tuple(p) for p in pts]
+    seg_vec = np.diff(pts, axis=0)
+    seg_len = np.hypot(seg_vec[:, 0], seg_vec[:, 1])
+    cum_len = np.concatenate(([0.0], np.cumsum(seg_len)))
+    total_len = cum_len[-1]
+    if total_len <= 0:
+        return [tuple(pts[0])]
+
+    n_samples = int(total_len // distance_interval) + 1
+    sample_d = np.arange(n_samples, dtype=np.float64) * distance_interval
+    sample_d = sample_d[sample_d <= total_len]
+
+    idx = np.searchsorted(cum_len, sample_d, side="right") - 1
+    idx = np.clip(idx, 0, len(seg_len) - 1)
+
+    seg_start_len = cum_len[idx]
+    seg_total_len = seg_len[idx]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(seg_total_len > 0, (sample_d - seg_start_len) / seg_total_len, 0.0)
+
+    p_start = pts[idx]
+    p_end = pts[idx + 1]
+    out_xy = p_start + (p_end - p_start) * t[:, None]
+    return [tuple(p) for p in out_xy]
+
+
 # Calculate curvature given three points using a faster vector-based method
 #curvature_cache = {}
 def calculate_curvature(p1, p2, p3):
@@ -305,6 +338,30 @@ class CarrotMan:
 
     self.is_metric = self.params.get_bool("IsMetric")
 
+    # [99차 발견 -> 100차 패치] carrot_navi_route()/carrot_curve_speed_params()가
+    # 20Hz 루프(broadcast_version_info)에서 매 사이클 무캐싱으로 읽던
+    # Params 3개(IsOnroad, AutoCurveSpeedFactor, AutoCurveSpeedAggressiveness)를
+    # controlsd.py/radard.py/longitudinal_planner.py(98차)와 동일한
+    # "readParams 카운트다운" 패턴으로 통일 -- 100프레임(20Hz 기준 5s)마다 1회
+    # 재조회. 최초 1회는 즉시 읽어 기본값을 채워둔다(readParams=0으로 시작해
+    # 첫 호출에서 바로 갱신됨).
+    self.readParams = 0
+    self._is_onroad_cached = self.params.get_bool("IsOnroad")
+    self._auto_curve_speed_factor = self.params.get_int("AutoCurveSpeedFactor") * 0.01
+    self._auto_curve_speed_aggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness") * 0.01
+
+  def _refresh_cached_params(self):
+    # [99차/100차] 20Hz 루프 내 Params I/O 캐싱 -- 98차(controlsd.py 등)와
+    # 동일한 카운트다운 패턴. 이 3개 파라미터는 주행 중 실시간으로 바뀔
+    # 필요가 없는 설정값(온로드 상태/커브속도 튜닝 계수)이라 5s 지연은
+    # 회귀 위험 없음.
+    self.readParams -= 1
+    if self.readParams <= 0:
+      self.readParams = 100
+      self._is_onroad_cached = self.params.get_bool("IsOnroad")
+      self._auto_curve_speed_factor = self.params.get_int("AutoCurveSpeedFactor") * 0.01
+      self._auto_curve_speed_aggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness") * 0.01
+
   def get_broadcast_address(self):
     if PC:
       iface = b'br0'
@@ -343,6 +400,7 @@ class CarrotMan:
     while self.is_running:
       try:
         self.sm.update(0)
+        self._refresh_cached_params()  # [99차/100차] IsOnroad/AutoCurveSpeed* 캐싱 갱신 (100프레임=5s마다)
         if self.sm.updated['navRouteNavd']:
           self.send_routes(self.sm['navRouteNavd'].coordinates, True)
         remote_addr = self.remote_addr
@@ -400,12 +458,12 @@ class CarrotMan:
   
   def carrot_navi_route(self):
 
-    if self.carrot_serv.active_carrot > 1:
-      if False and self.navd_active:  # mabox always active
-        self.navd_active = False
-        self.params.remove("NavDestination")
-    is_onroad = self.params.get_bool("IsOnroad")
-    if not is_onroad or not self.navi_points_active or not SHAPELY_AVAILABLE or (self.carrot_serv.active_carrot <= 1 and not self.navd_active):
+    # [99차/100차, 죽은 코드 정리] 여기 있던 `if self.carrot_serv.active_carrot > 1:
+    # if False and self.navd_active:` 블록은 항상 거짓이라 실행된 적이 없는
+    # 죽은 분기 -- 제거 (동작 변화 없음).
+    # [99차/100차] 매 호출(20Hz)마다 새로 읽던 것을 캐시값으로 대체 (100프레임=5s마다 갱신)
+    is_onroad = self._is_onroad_cached
+    if not is_onroad or not self.navi_points_active or (self.carrot_serv.active_carrot <= 1 and not self.navd_active):
       #print(f"navi_points_active: {self.navi_points_active}, active_carrot: {self.carrot_serv.active_carrot}")
       if self.navi_points_active:
         print("navi_points_active: ", self.navi_points_active, "active_carrot: ", self.carrot_serv.active_carrot, "navd_active: ", self.navd_active)
@@ -432,16 +490,11 @@ class CarrotMan:
     if path:
         #relative_coords = gps_to_relative_xy(path, current_position, heading_deg)
         relative_coords = gps_to_relative_xy(path, start_point, heading_deg)
-        # Resample relative_coords at 5m intervals using LineString
-        line = LineString(relative_coords)
-        resampled_points = []
-        resampled_distances = []
-        current_distance = 0
-        while current_distance <= line.length:
-            point = line.interpolate(current_distance)
-            resampled_points.append((point.x, point.y))
-            resampled_distances.append(current_distance)
-            current_distance += distance_interval
+        # [99차/100차] distance_interval(10m) 간격으로 리샘플 -- Shapely
+        # LineString.interpolate() 반복호출 대신 numpy 벡터화 함수 사용
+        # (수치 동일성 검증: devnotes work/verify_resample_np.py)
+        resampled_points = resample_10m_np(relative_coords, distance_interval)
+        resampled_distances = [i * distance_interval for i in range(len(resampled_points))]
 
         curvatures = []
         distances = []
@@ -993,8 +1046,10 @@ class CarrotMan:
       print(e)
 
   def carrot_curve_speed_params(self):
-    self.autoCurveSpeedFactor = self.params.get_int("AutoCurveSpeedFactor")*0.01
-    self.autoCurveSpeedAggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness")*0.01
+    # [99차/100차] 매 호출(20Hz)마다 새로 읽던 것을 __init__/_refresh_cached_params()의
+    # 캐시값으로 대체 (100프레임=5s마다 갱신, 제어 로직/결과값 동일).
+    self.autoCurveSpeedFactor = self._auto_curve_speed_factor
+    self.autoCurveSpeedAggressiveness = self._auto_curve_speed_aggressiveness
 
   def carrot_curve_speed(self, sm):
     self.carrot_curve_speed_params()

@@ -275,26 +275,20 @@ class Controls:
     hudControl.leadDPath = leadOne.dPath
 
     meta = self.sm['modelV2'].meta
-    if False: # command
-      desire_map = {
-        log.Desire.turnLeft: 1,
-        log.Desire.turnRight: 2,
-        log.Desire.laneChangeLeft: 3,
-        log.Desire.laneChangeRight: 4,
-      }
-      hudControl.modelDesire = desire_map.get(meta.desire, 0)
-    else: # model.
-      hud_desire = 0
-      if len(meta.desireState) > 4:
-        if meta.desireState[1] > 0.1:
-          hud_desire = 1   # turnLeft
-        elif meta.desireState[2] > 0.1:
-          hud_desire = 2   # turnRight
-        elif meta.desireState[3] > 0.1:
-          hud_desire = 3   # laneChangeLeft
-        elif meta.desireState[4] > 0.1:
-          hud_desire = 4   # laneChangeRight
-      hudControl.modelDesire = hud_desire
+    # [99차/100차, 죽은 코드 정리] 여기 있던 `if False: # command` 분기(desire_map
+    # 딕셔너리 생성 코드)는 항상 거짓이라 실행된 적이 없는 죽은 코드 -- 제거
+    # (동작 변화 없음, 아래 model 기반 분기만 원래도 실제 실행 경로였음).
+    hud_desire = 0
+    if len(meta.desireState) > 4:
+      if meta.desireState[1] > 0.1:
+        hud_desire = 1   # turnLeft
+      elif meta.desireState[2] > 0.1:
+        hud_desire = 2   # turnRight
+      elif meta.desireState[3] > 0.1:
+        hud_desire = 3   # laneChangeLeft
+      elif meta.desireState[4] > 0.1:
+        hud_desire = 4   # laneChangeRight
+    hudControl.modelDesire = hud_desire
 
     hudControl.rightLaneVisible = True
     hudControl.leftLaneVisible = True
