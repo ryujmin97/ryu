@@ -7,6 +7,10 @@
 
 #include <OMX_Component.h>
 extern "C" {
+// 128차: avformat.h가 avcodec.h를 전이 include 해주던 구버전 ffmpeg 관행에
+// 의존하고 있었음. ffmpeg 6.x부터 이 전이 include가 사라져 AVCodecContext
+// 미선언 컴파일 에러 발생 가능 -> 명시적으로 직접 include.
+#include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 }
 
