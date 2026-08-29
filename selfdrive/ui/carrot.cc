@@ -1111,6 +1111,14 @@ protected:
             }
         }
 	}
+    // ===== 경로안내창(TBT HUD) 크기 설정 =====
+    // 100차 이전: 폭 790px (화면 절반 가까이 차지, 차량 시야 가림 큼)
+    // 변경: 폭만 460px로 축소 (높이 300px는 유지 — 목표 크기 실측 결과 폭 차이가 지배적)
+    static constexpr int TBT_BOX_W = 460;   // 기존 790
+    static constexpr int TBT_BOX_H = 300;   // 기존과 동일 (240+60)
+    static constexpr int TBT_MARGIN_R = 10; // 우측 여백 (기존과 동일)
+    static constexpr int TBT_ICON_SIZE = 140; // 기존 icon_size(256) 대신 축소 전용 크기 사용
+
     int  drawTurnInfoHud(const UIState* s) {
       if (s->fb_w < 1200) return -1;
 #ifdef __UI_TEST
@@ -1129,43 +1137,44 @@ protected:
         //if (xDistToTurn <= 0 || nGoPosDist <= 0) return;
         char str[128] = "";
 
-        int tbt_x = s->fb_w - 800;
+        int tbt_x = s->fb_w - (TBT_BOX_W + TBT_MARGIN_R);
         int tbt_y = s->fb_h - 250;
         NVGcolor stroke_color = COLOR_WHITE;
         if (s->scene._current_carrot_display == 3) {
-          ui_fill_rect(s->vg, { tbt_x, 5, 790, s->fb_h - 15 }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
+          ui_fill_rect(s->vg, { tbt_x, 5, TBT_BOX_W, s->fb_h - 15 }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
         }
         if (nGoPosDist > 0 && nGoPosTime > 0);
         else return -1;
         if (s->scene._current_carrot_display == 3);
         else {
-          ui_fill_rect(s->vg, { tbt_x, tbt_y - 60, 790, 240 + 60 }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
+          ui_fill_rect(s->vg, { tbt_x, tbt_y - 60, TBT_BOX_W, TBT_BOX_H }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
         }
+        // 상단: 안내 문구 (예: "분기점")
         if (szTBTMainText.length() > 0) {
           nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
-          ui_draw_text(s, tbt_x + 20, tbt_y - 15, szTBTMainText.toStdString().c_str(), 40, COLOR_WHITE, BOLD);
-          //ui_draw_text(s, tbt_x + 190, tbt_y - 5, szPosRoadName.toStdString().c_str(), 40, COLOR_WHITE, BOLD);
+          ui_draw_text(s, tbt_x + 20, tbt_y - 15, szTBTMainText.toStdString().c_str(), 32, COLOR_WHITE, BOLD);
         }
 
+        // 좌측: 회전/분기 아이콘 + 잔여거리 (세로 배치, 아이콘 축소)
+        int bx = tbt_x + 85;
+        int by = tbt_y + 80;
         if(xTurnInfo > 0) {
             nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
-            int bx = tbt_x + 100;
-            int by = tbt_y + 85;
             if (atc_type.length() > 0) {
               stroke_color = COLOR_BLACK;
-              ui_fill_rect(s->vg, { bx - 80, by - 90, 160, 230 }, atc_type.contains("prepare")?COLOR_GREEN_ALPHA(100) : COLOR_GREEN, 15, 1.0f, &stroke_color);
+              ui_fill_rect(s->vg, { bx - 65, by - 75, 130, 175 }, atc_type.contains("prepare")?COLOR_GREEN_ALPHA(100) : COLOR_GREEN, 12, 1.0f, &stroke_color);
             }
             switch (xTurnInfo) {
-            case 1: ui_draw_image(s, { bx - icon_size / 2, by - icon_size / 2, icon_size, icon_size }, "ic_turn_l", 1.0f); break;
-            case 2: ui_draw_image(s, { bx - icon_size / 2, by - icon_size / 2, icon_size, icon_size }, "ic_turn_r", 1.0f); break;
-            case 3: ui_draw_image(s, { bx - icon_size / 2, by - icon_size / 2, icon_size, icon_size }, "ic_lane_change_l", 1.0f); break;
-            case 4: ui_draw_image(s, { bx - icon_size / 2, by - icon_size / 2, icon_size, icon_size }, "ic_lane_change_r", 1.0f); break;
-            case 7: ui_draw_image(s, { bx - icon_size / 2, by - icon_size / 2, icon_size, icon_size }, "ic_turn_u", 1.0f); break;
-            case 6: ui_draw_text(s, bx, by + 20, "TG", 35, COLOR_WHITE, BOLD); break;
-            case 8: ui_draw_text(s, bx, by + 20, "목적지", 35, COLOR_WHITE, BOLD); break;
+            case 1: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_turn_l", 1.0f); break;
+            case 2: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_turn_r", 1.0f); break;
+            case 3: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_lane_change_l", 1.0f); break;
+            case 4: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_lane_change_r", 1.0f); break;
+            case 7: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_turn_u", 1.0f); break;
+            case 6: ui_draw_text(s, bx, by + 15, "TG", 28, COLOR_WHITE, BOLD); break;
+            case 8: ui_draw_text(s, bx, by + 15, "목적지", 26, COLOR_WHITE, BOLD); break;
             default:
                 sprintf(str, "감속:%d", xTurnInfo);
-                ui_draw_text(s, bx, by + 20, str, 35, COLOR_WHITE, BOLD);
+                ui_draw_text(s, bx, by + 15, str, 26, COLOR_WHITE, BOLD);
                 break;
             }
             if (s->scene.is_metric) {
@@ -1176,23 +1185,12 @@ protected:
               if (xDistToTurn < 1609) sprintf(str, "%d ft", (int)(xDistToTurn * 3.28084));
               else sprintf(str, "%.1f mi", xDistToTurn / 1609.344f);
             }
-            ui_draw_text(s, bx, by + 120, str, 40, COLOR_WHITE, BOLD);
-        }
-        nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
-        if (szSdiDescr.length() > 0) {
-            float bounds[4];  // [xmin, ymin, xmax, ymax]를 저장하는 배열
-            nvgFontSize(s->vg, 40);
-            nvgTextBounds(s->vg, tbt_x + 200, tbt_y + 200, szSdiDescr.toStdString().c_str(), NULL, bounds);
-            float text_width = bounds[2] - bounds[0];
-            float text_height = bounds[3] - bounds[1];
-            ui_fill_rect(s->vg, { (int)bounds[0] - 10, (int)bounds[1] - 2, (int)text_width + 20, (int)text_height + 13 }, COLOR_GREEN, 10);
-            ui_draw_text(s, tbt_x + 200, tbt_y + 200, szSdiDescr.toStdString().c_str(), 40, COLOR_WHITE, BOLD);
-        }
-        else if (szPosRoadName.length() > 0) {
-          ui_draw_text(s, tbt_x + 200, tbt_y + 200, szPosRoadName.toStdString().c_str(), 40, COLOR_WHITE, BOLD);
-          //ui_draw_text(s, tbt_x + 190, tbt_y - 5, szPosRoadName.toStdString().c_str(), 40, COLOR_WHITE, BOLD);
+            ui_draw_text(s, bx, by + 95, str, 32, COLOR_WHITE, BOLD);
         }
 
+        // 우측: 도착예정시간 + 잔여거리 (세로 2줄, 폭 축소에 맞춰 폰트 40 -> 32)
+        nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+        int info_x = tbt_x + 175;
         if (nGoPosDist > 0 && nGoPosTime > 0) {
             time_t now = time(NULL);  // 현재 시간 얻기
             struct tm* local = localtime(&now);
@@ -1201,10 +1199,26 @@ protected:
             mktime(local);
             bool is_kor = s->language == "main_ko";
             sprintf(str, "%s: %.1f%s(%02d:%02d)", (is_kor)?"도착":"ETA", (float)nGoPosTime / 60., (is_kor)?"분":"MIN", local->tm_hour, local->tm_min);
-            ui_draw_text(s, tbt_x + 190, tbt_y + 80, str, 50, COLOR_WHITE, BOLD);
+            ui_draw_text(s, info_x, tbt_y + 75, str, 30, COLOR_WHITE, BOLD);
             sprintf(str, "%.1f%s", nGoPosDist / 1000. * ((s->scene.is_metric)?1:KM_TO_MILE), (s->scene.is_metric) ? "km" : "mile");
-            ui_draw_text(s, tbt_x + 190 + 120, tbt_y + 130, str, 50, COLOR_WHITE, BOLD);
+            ui_draw_text(s, info_x, tbt_y + 115, str, 30, COLOR_WHITE, BOLD);
         }
+
+        // 하단: 과속카메라 안내(szSdiDescr) 또는 도로명(szPosRoadName), 전체 폭 사용
+        nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+        if (szSdiDescr.length() > 0) {
+            float bounds[4];  // [xmin, ymin, xmax, ymax]를 저장하는 배열
+            nvgFontSize(s->vg, 30);
+            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), NULL, bounds);
+            float text_width = bounds[2] - bounds[0];
+            float text_height = bounds[3] - bounds[1];
+            ui_fill_rect(s->vg, { (int)bounds[0] - 8, (int)bounds[1] - 2, (int)text_width + 16, (int)text_height + 10 }, COLOR_GREEN, 8);
+            ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), 30, COLOR_WHITE, BOLD);
+        }
+        else if (szPosRoadName.length() > 0) {
+          ui_draw_text(s, tbt_x + 20, tbt_y + 220, szPosRoadName.toStdString().c_str(), 30, COLOR_WHITE, BOLD);
+        }
+
         return 0;
     }
 public:
