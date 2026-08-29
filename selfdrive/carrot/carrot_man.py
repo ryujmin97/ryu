@@ -48,6 +48,12 @@ V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 40, 15, 5]
 # ("안전마진 휴리스틱")을 시뮬레이션 검증(커브A/B + 직선 154초) 후 확정.
 ROUTE_ENTRY_MARGIN_KPH = 25.0
 
+# [132차] carrot_navi_route()가 호출되는 broadcast_version_info()의
+# Ratekeeper(20) 주기(초). Hypothesis C(131차) 대응 프레임간 램프
+# 리미터에서 accel_limit_kmh와 곱해 "이 주기 동안 물리적으로 허용되는
+# 최대 속도 변화"를 계산하는 데 사용.
+ROUTE_SPEED_LOOP_DT = 0.05
+
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
 def haversine(lon1, lat1, lon2, lat2):
@@ -355,6 +361,11 @@ class CarrotMan:
     self.navi_points_start_index = 0
     self.navi_points_active = False
     self.navd_active = False
+    # [132차] Hypothesis C(131차) 대응: carrot_navi_route()의 route_lookahead
+    # 윈도우 경계로 급커브가 이산적으로 진입하며 out_speed가 단일 20Hz
+    # 프레임에 급락(최대 Δ-25kph 실측)하는 현상을 완화하기 위한 프레임간
+    # 램프 리미터 상태값. None이면 리미터 미적용(최초 활성화/직후 상태).
+    self._route_speed_prev = None
 
     self.active_carrot_last = False
 
@@ -488,6 +499,9 @@ class CarrotMan:
           #self.params.remove("NavDestination")
           pass
       self.active_carrot_last = self.carrot_serv.active_carrot
+      # [132차] route 비활성화 -- 다음 활성화 시 리미터가 과거 값을 끌고
+      # 오지 않도록 리셋(제약 해제 방향은 항상 즉시 반영되어야 안전).
+      self._route_speed_prev = None
       return [],[],300
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
@@ -594,12 +608,42 @@ class CarrotMan:
             #out_speed = interp(distance_advance, distances, out_speeds)
             out_speed = out_speeds[0]
             #print(f"out_speeds= {[round(s, 1) for s in out_speeds]}")
+
+            # [132차, Hypothesis C(131차) 대응] route_lookahead_m 윈도우
+            # 경계로 급커브 지점이 이산적으로 curvature 배열에 "출현"하는
+            # 순간, 위 역방향 DP가 그 프레임에 즉시 전체를 재계산해
+            # out_speeds[0](=out_speed)까지 낮은 값이 단일 20Hz 프레임에
+            # 전파될 수 있음(129차 실측 Δ-24~-25kph 단일프레임 급락,
+            # 131차 합성검증 SUCCESS로 메커니즘 확인). 이 자체가 새로운
+            # 제약을 추가하는 게 아니라 -- route_lookahead_m이 애초에
+            # "이 accel_limit_kmh로 감속하기에 충분한 거리"를 목표로
+            # 산정되므로(84차/85차), 경계 스냅이 없었다면 매 프레임 이미
+            # 성립했어야 할 불변식(프레임당 변화 <= accel_limit_kmh*dt)을
+            # 최종 출력에서 강제로 복원하는 것에 가깝다. 대칭 적용(증가
+            # 방향도 동일 램프) -- 129차/131차가 보고한 "회전 종료 즉시
+            # 원복" 계단도 같은 메커니즘이라 함께 완화됨.
+            # 사전검증: devnotes toolkit/sim_route_boundary_ramp_limiter.py
+            # (132차) -- curve_R 10~25m/accel 0.70~1.2 조합에서 정상주행
+            # 구간 최대 프레임당 낙차가 이론 상한(accel_limit_kmh*dt)
+            # 이내로 억제됨을 확인(PASS).
+            if self._route_speed_prev is not None:
+              max_step_kmh = accel_limit_kmh * ROUTE_SPEED_LOOP_DT
+              lo = self._route_speed_prev - max_step_kmh
+              hi = self._route_speed_prev + max_step_kmh
+              out_speed = min(max(out_speed, lo), hi)
+            self._route_speed_prev = out_speed
     else:
         resampled_points = []
         resampled_distances = []
         curvatures = []
         speeds = []
         distances = []
+        # [132차] "제약 없음"(윈도우 내 유효 포인트 부족) 상태로 전환 --
+        # 이 방향은 허용속도가 올라가는 안전한 방향(제약 해제)이므로
+        # 리미터를 즉시 리셋해 다음 번 실제 제약이 나타날 때 정상적으로
+        # 다시 램프가 걸리도록 한다(과거 값에 묶여 완화가 지연되는 역설
+        # 방지).
+        self._route_speed_prev = None
         #self.params.remove("NavDestination")
 
     return resampled_points, resampled_distances, out_speed #speeds, distances
