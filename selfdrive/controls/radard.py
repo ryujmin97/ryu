@@ -41,6 +41,22 @@ LEAD_BLEND_SAFE_DIST_TIME = 0.35 # s   : time constant to blend dRel/vRel toward
 LEAD_LOST_GRACE_TIME     = 0.6   # s   : hold last known lead through a brief vision miss (debounce)
 CUTOUT_DPATH_THRESH      = 2.0   # m   : |dPath| beyond this = lead has clearly left our path (cut-out)
 CUTOUT_VREL_GATE         = -0.5  # m/s : only treat a miss as a cut-out if lead wasn't strongly closing
+
+# 118차/119차: 검증된 레이더락("빨간 박스") 상태에서도 능동적으로 차선이탈을
+# 감지해 락을 강제 해제하는 게이트. 기존 CUTOUT_DPATH_THRESH/_is_cutout()은
+# LeadBlend.update()가 호출되는 경로(파란박스/sccFallback)에서만 평가되는데,
+# RadarD.update()는 빨간박스 상태면 LeadBlend.update() 자체를 건너뛰고
+# lead_one_raw를 그대로 발행하므로 이 검사가 전혀 닿지 않는다(118차 원인
+# 확정: "앞차 차선이탈에도 락온 미해제→출발지연" 제보의 근본 원인).
+# 임계값은 CUTOUT_DPATH_THRESH(2.0m)를 그대로 재사용하지 않고 1.75m로
+# 좁혔다 -- 119차 route1 실측 이벤트(t=5915~5932) 재현 결과 dPath가
+# 최대 -1.97~-1.99m에서 정체돼 2.0m로는 이 게이트가 전혀 트리거되지
+# 않는다는 것이 시뮬레이션(toolkit/sim_lane_departure_gate.py)으로
+# 확인됨. 단 이 값은 근사 재현(route1.csv 실측 replay 아님) 기반이므로
+# 실측 replay로 재확인 전까지는 잠정치.
+LANE_DEPARTURE_DPATH_THRESH = 1.75  # m   : 119차 검증 잠정치(2.0m 재사용 시 118차 사례 자체가 미탐지됨)
+LANE_DEPARTURE_CONFIRM_S    = 0.5   # s   : 단일 프레임 dPath 진동(정상 커브 주행 중 실측 ±0.3~0.9m, 118차 기록) 오탐 방지
+LANE_DEPARTURE_VREL_GATE    = CUTOUT_VREL_GATE  # m/s : danger override와 철학 일치, 강접근 중이면 유지
 # 2026-08-16 실주행 로그(총 67분) 분석 결과 추가된 게이트:
 LEAD_BLEND_CLOSER_JUMP_DIST = 8.0  # m : 새 dRel이 이전보다 이만큼 더 가까우면, vRel이 잠잠해 보여도
                                     #     위험으로 간주하고 즉시 반영. SCC가 근접구간/사각지대에서
@@ -766,6 +782,12 @@ class RadarD:
     }
     self._corner_state = {"L": 0, "R": 0}  # -1,0,+1
 
+    # 118차/119차: 빨간박스 상태에서도 적용되는 차선이탈 강제해제 게이트용
+    # 디바운스 카운터. index별(0=leadOne, 1=leadTwo)로 분리 -- 현재는
+    # leadOne(index=0)에만 적용, leadTwo는 cut-in 감지 등 용도가 달라
+    # 미검토 상태(119차 미결정 사항, dict 구조만 확장 대비해 미리 둠).
+    self._lane_departure_cnt = {0: 0.0, 1: 0.0}
+
 
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
@@ -914,6 +936,27 @@ class RadarD:
 
     if self.enable_corner_radar > 1:
       lead_dict = self.corner_radar(CS, lead_dict)
+
+    # 118차/119차: 빨간박스(radar=True) 상태를 포함해 모든 경로에서
+    # 공통 적용되는 차선이탈 강제해제 게이트. LeadBlend._is_cutout()과
+    # 달리 여기서는 lead_dict가 확정된 직후(어느 경로로 왔든) 매 프레임
+    # 재평가한다 -- radar-lock 우회 경로(위 RadarD.update()의
+    # "빨간박스: ... 블렌딩 지연 없이 그대로 사용" 분기)에도 검사가
+    # 반드시 닿게 하기 위함. index==0(leadOne)에만 적용(119차 미결정
+    # 3번: leadTwo는 향후 세션에서 별도 판단).
+    if index == 0:
+      if lead_dict['status']:
+        dPath = abs(lead_dict.get('dPath', 0.0))
+        vRel = lead_dict.get('vRel', 0.0)
+        if dPath > LANE_DEPARTURE_DPATH_THRESH and vRel > LANE_DEPARTURE_VREL_GATE:
+          self._lane_departure_cnt[0] += DT_MDL
+          if self._lane_departure_cnt[0] >= LANE_DEPARTURE_CONFIRM_S:
+            lead_dict = {'status': False}
+            radar = False
+        else:
+          self._lane_departure_cnt[0] = 0.0
+      else:
+        self._lane_departure_cnt[0] = 0.0
 
     if low_speed_override:
       low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]
