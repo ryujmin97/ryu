@@ -205,7 +205,15 @@ class Controls:
     if not CC.latActive:
       new_desired_curvature = self.curvature
     elif use_mpc_curvature:
-      if len(lat_plan.curvatures) == 0:
+      # 141차: len(curvatures)==0(메시지 전무) 폴백만으로는 "배열은 채워졌지만
+      # 아직 유효하지 않은 MPC 해"(전환/초기 프레임, solution_invalid_cnt>=2
+      # 또는 NaN 발생 시 lateral_planner.py가 reset_mpc()로 zeros를 발행)를
+      # 걸러내지 못함(140차 패치 리뷰에서 지적됨). lateralPlan.mpcSolutionValid는
+      # 원래부터 발행되고 있었으나 레인모드에서도 체크된 적이 없었음(기존
+      # 레인모드/레인리스 공통 안전장치로 이번에 추가) -- False면 자기 자신
+      # (self.curvature, 직전 유지)으로 폴백해 무효 solution이 그대로 조향에
+      # 들어가는 것을 방지.
+      if len(lat_plan.curvatures) == 0 or not lat_plan.mpcSolutionValid:
         new_desired_curvature = self.curvature
       else:
         curvature = get_lag_adjusted_curvature(self.CP, CS.vEgo, lat_plan.psis, lat_plan.curvatures, steer_actuator_delay + lat_smooth_seconds, lat_plan.distances)
