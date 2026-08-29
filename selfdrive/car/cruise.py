@@ -497,10 +497,11 @@ class VCruiseCarrot:
         if self._soft_hold_active > 0:
           self._soft_hold_active = 0
         elif self._cruise_ready or CS.cruiseState.standstill or self.carrot_cruise_active:
-          if False: #self._cruise_button_mode in [2, 3]:
-            road_limit_kph = self.nRoadLimitSpeed * self.autoSpeedUptoRoadSpeedLimit
-            if road_limit_kph > 1.0:
-              v_cruise_kph = max(v_cruise_kph, road_limit_kph)
+          # 135차: 항상 거짓인 `if False: #self._cruise_button_mode in [2, 3]:`
+          # 죽은 분기 제거(동작 무변화 -- 이 elif 조건이 참이면 원래도 아무
+          # 것도 하지 않았음). elif 자체는 그대로 둬야 아래 조건들의 평가
+          # 순서(다른 elif로 안 넘어감)가 보존된다.
+          pass
         elif not CC.enabled:
           # [세션79] 수동주행 중 첫 +RES(accelCruise) 인게이지: v_cruise_kph가
           # CC.enabled=False인 동안 현재속도를 추종하지 않고 이전 값에 멈춰있으므로
