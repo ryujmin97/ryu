@@ -1074,16 +1074,35 @@ class LongitudinalMpc:
         # 차선변경과 무관한 일반 discontinuity는 기존 그대로(1.0s hard-hold,
         # 소스 'discontinuity', frac 게이트 + hard-cutoff) -- 이미 실차검증
         # 끝난 조합이라 회귀 방지.
+        # 134차(정적 리뷰 발견, boost-arm 가드 비대칭 수정): 112차가
+        # low_speed_strong_decel arm 시점에 "이미 부스트 진행 중이면
+        # 덮어쓰지 않음" 가드를 넣었지만, 반대 방향(plain 'discontinuity'
+        # 트리거가 이미 진행 중인 더 긴 hold를 덮어써 단축시키는 경우)은
+        # 보호가 없었다. handoff/discontinuity_lc/low_speed_strong_decel은
+        # 전부 동일하게 RADAR_HANDOFF_JERK_BOOST_S(4.0s)를 쓰므로 서로
+        # 덮어써도 기간이 줄지 않지만(같은 길이로 재시작), plain
+        # 'discontinuity'만 DISCONTINUITY_JERK_COST_BOOST_S(1.0s)로 훨씬
+        # 짧다 -- 이 트리거만 별도 가드가 필요하다(아래 elif).
         if lane_change_blinker_active or self._lane_change_vlead_hold_timer > 0.0:
           self._discontinuity_jerk_boost_timer = RADAR_HANDOFF_JERK_BOOST_S
           self._discontinuity_trigger_source = 'discontinuity_lc'
-        else:
+          self._handoff_release_value = None
+          # 109차(옵션1): 새 트리거는 확정 이력을 새로 시작 -- 이전 트리거에서
+          # 누적됐던 confirm 타이머가 이번 트리거에 그대로 이어지지 않게 한다.
+          self._lc_danger_confirm_timer = 0.0
+        elif (self._discontinuity_jerk_boost_timer <= 0.0
+              or self._discontinuity_trigger_source == 'discontinuity'):
+          # 부스트가 없거나(무위험 상태) 이미 같은 'discontinuity' 소스가
+          # 진행 중인 재트리거일 때만 (재)arm -- 기존 동작과 100% 동일.
           self._discontinuity_jerk_boost_timer = DISCONTINUITY_JERK_COST_BOOST_S
           self._discontinuity_trigger_source = 'discontinuity'
-        self._handoff_release_value = None
-        # 109차(옵션1): 새 트리거는 확정 이력을 새로 시작 -- 이전 트리거에서
-        # 누적됐던 confirm 타이머가 이번 트리거에 그대로 이어지지 않게 한다.
-        self._lc_danger_confirm_timer = 0.0
+          self._handoff_release_value = None
+          self._lc_danger_confirm_timer = 0.0
+        # else: handoff/discontinuity_lc/low_speed_strong_decel(4.0s)이
+        # 이미 진행 중 -- 차선변경과 무관한 이 plain discontinuity 트리거가
+        # 그 더 긴 hold/release 상태(및 discontinuity_lc의 confirm 진행률)를
+        # 건드리지 않고 그대로 흘러가게 둔다(태그/타이머/handoff_release_
+        # value/confirm_timer 전부 미변경).
 
       if self._vision_dRel_prev is not None:
         raw_rate = (dRel_now - self._vision_dRel_prev) / max(self.dt, 1e-3)
