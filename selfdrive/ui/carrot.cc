@@ -960,7 +960,6 @@ public:
 };
 class TurnInfoDrawer : ModelDrawer {
 private:
-    int icon_size = 256;
     int xSpdLimit = 0;
     int xSpdDist = 0;
     int xSignType = -1;
