@@ -69,6 +69,30 @@ LEAD_BLEND_BIG_JUMP_DIST    = 15.0 # m : 이보다 큰 '안전 방향' 점프는
                                     #     수 있음. 정체 구간 비전 트랙 흔들림에서 실측: route1
                                     #     t=1388~1390s / route2 t=825~827s)
 
+# 104차/130차: 위 BIG_JUMP '즉시 스냅' 로직은 큰 farther jump를 전부
+# "다른 물체" 신호로 신뢰하는데, 실차 재현(104차, route 0000034f--ed879bbde8
+# seg10/11, t=684.3~688.97)에서 이 신뢰가 깨지는 경우를 확인함: 3.5초간
+# 안정적으로 레이더 락온되던 리드가 조향각 증가(커브 진입)로 락을 잃고
+# vision-only 저신뢰(prob≈0.24) 폴백으로 전환되는 순간, 실제로는 근접
+# (qcamera 대조 약 30~40m) 실물체인데도 vision 단독 추정이 84~89m로 튀며
+# BIG_JUMP 경로를 타고 블렌딩 없이 즉시 스냅됨 -- "다른(더 먼) 물체로
+# 바뀌었다"는 판단 자체가, 실은 "같은 근접 물체를 저신뢰 vision이 잘못
+# 원거리로 오판"한 것이었음. 교차검증된 레이더(radar=True, 118차 우회
+# 경로 포함)나 고신뢰 vision(modelProb 충분히 높음)의 big jump는 기존
+# 그대로 즉시 스냅 유지(회귀 없음) -- 저신뢰 vision-only far jump만
+# 블렌딩 경로로 넘겨 급격한 원거리 오판이 그대로 MPC에 즉시 반영되는
+# 것을 막는다. 즉시 차단이 아니라 LEAD_BLEND_SAFE_DIST_TIME(0.35s)
+# 시정수의 점진 전환으로 완화 -- 그 사이 레이더 재획득/vision 신뢰 회복
+# 또는 진짜 근접(closer_jump/TTC danger)이 오면 기존 danger-passthrough
+# 경로가 즉시 override하므로 반응 지연 위험은 없음.
+# 게이트값은 VISION_TRACK_PROB_GATE(58차1번: "이 이상이면 실측 dRel미분
+# 경로 신뢰")와 동일한 0.70을 그대로 재사용 -- "vision 단독값을 레이더급
+# 으로 신뢰할 수 있는 최소 확신도"라는 동일 철학. (주의: VISION_TRACK_
+# PROB_GATE 정의가 이 파일 뒤쪽(L422 부근)에 있어 여기서 직접 참조하면
+# import 시 NameError -- 값만 리터럴로 복제, 두 상수를 함께 바꿀 땐 동시
+# 수정 필요)
+LEAD_BLEND_BIG_JUMP_PROB_GATE = 0.70
+
 # --- SCC 단일점 폴백 안전 게이트 (37차) ---
 # get_lead()에서 비전 매칭 실패/저확신(prob<.6) 시 track_scc(단일점 SCC
 # 레이더, trackId=0)를 차로내 위치 검증 없이 그대로 채택하던 문제 대응.
@@ -644,7 +668,13 @@ class LeadBlend:
   - Jumps bigger than LEAD_BLEND_BIG_JUMP_DIST in the safe direction are
     treated as a track identity change, not measurement noise, and are
     snapped immediately instead of blended (blending a large gap over a fixed
-    time window fabricates an implied relative speed that isn't real).
+    time window fabricates an implied relative speed that isn't real) --
+    but only when the raw reading is trustworthy (radar-confirmed or
+    modelProb >= LEAD_BLEND_BIG_JUMP_PROB_GATE). A low-confidence
+    vision-only far jump (e.g. right after losing radar lock mid-curve)
+    goes through the normal blend instead, since it may be a misjudged
+    distance on the same near lead rather than a real track switch
+    (104차/130차).
   """
   def __init__(self):
     self.prev: dict | None = None
@@ -713,7 +743,17 @@ class LeadBlend:
     # 다른 물체로 대상이 바뀐 것으로 보고 블렌딩 없이 즉시 반영한다. 고정된
     # 시간(LEAD_BLEND_SAFE_DIST_TIME)에 큰 거리 차를 나눠 블렌딩하면, 실제로는
     # 없는 상대속도가 그 구간 동안 인위적으로 생겨 MPC 입력을 왜곡할 수 있다.
-    if abs(raw['dRel'] - self.prev.get('dRel', raw['dRel'])) > LEAD_BLEND_BIG_JUMP_DIST:
+    #
+    # 104차/130차: 단, 이 즉시-스냅은 raw가 충분히 신뢰할 만할 때만 적용한다.
+    # 레이더 교차검증(radar=True) 또는 고신뢰 vision(modelProb>=
+    # LEAD_BLEND_BIG_JUMP_PROB_GATE)이면 기존과 동일하게 즉시 반영(회귀 없음).
+    # 저신뢰 vision-only far jump는 "다른 물체로 전환"이 아니라 "레이더
+    # 유실 직후 vision 단독 추정이 근접 실물체를 원거리로 오판"한 경우일 수
+    # 있음(104차 실차 확인) -- 이 경우만 아래 일반 블렌딩 경로로 흘려보내
+    # LEAD_BLEND_SAFE_DIST_TIME 시정수로 점진 반영한다(완전 차단 아님).
+    is_big_jump = abs(raw['dRel'] - self.prev.get('dRel', raw['dRel'])) > LEAD_BLEND_BIG_JUMP_DIST
+    is_trusted = raw.get('radar', False) or raw.get('modelProb', 0.0) >= LEAD_BLEND_BIG_JUMP_PROB_GATE
+    if is_big_jump and is_trusted:
       self.prev = dict(raw)
       return raw
 
