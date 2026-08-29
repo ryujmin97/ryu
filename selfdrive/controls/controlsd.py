@@ -93,6 +93,10 @@ class Controls:
     self._steer_actuator_delay_param = 0.0
     self._speed_from_pcm = 0
     self._disable_dm = 0
+    # 140차: 레인리스에서도 PathOffset이 반영되도록 하기 위한 캐시값.
+    # PathOffset==0(기본값)이면 기존 동작(model_v2.action.desiredCurvature)과
+    # 완전히 동일하게 동작 -- 리그레션 방지.
+    self._path_offset_active = False
 
   def update(self):
     self.sm.update(15)
@@ -116,6 +120,13 @@ class Controls:
       self._steer_actuator_delay_param = self.params.get_float("SteerActuatorDelay") * 0.01
       self._speed_from_pcm = self.params.get_int("SpeedFromPCM")
       self._disable_dm = self.params.get_int("DisableDM")
+      # 140차: PathOffset은 lateral_planner.py(별도 프로세스)가 이미
+      # path_xyz/MPC에 반영해 lateralPlan.curvatures로 발행하지만, 기존
+      # 코드는 레인리스에서 이 값을 쓰지 않고 model_v2.action.desiredCurvature
+      # (신경망 직접출력, PathOffset과 무관)를 사용해 레인리스에서 PathOffset이
+      # 미반영되던 문제(138/139차 분석) -- 0이 아닐 때만 아래 curvature 선택
+      # 분기를 전환.
+      self._path_offset_active = self.params.get_int("PathOffset") != 0
 
     # Update VehicleModel
     lp = self.sm['liveParameters']
@@ -184,9 +195,16 @@ class Controls:
     if steer_actuator_delay == 0.0:
       steer_actuator_delay = self.sm['liveDelay'].lateralDelay 
 
+    # 140차: PathOffset이 설정된 경우, 레인리스 구간(lanefull_mode_enabled=False)에서도
+    # lateralPlan.curvatures(=lateral_planner.py의 MPC 출력, PathOffset이 이미
+    # path_xyz에 반영되어 계산된 값)를 사용하도록 함. PathOffset==0(기본값)이면
+    # 이 조건이 항상 False이므로 기존 동작(model_v2.action.desiredCurvature)과
+    # 완전히 동일 -- 리그레션 없음.
+    use_mpc_curvature = self.lanefull_mode_enabled or self._path_offset_active
+
     if not CC.latActive:
       new_desired_curvature = self.curvature
-    elif self.lanefull_mode_enabled:
+    elif use_mpc_curvature:
       if len(lat_plan.curvatures) == 0:
         new_desired_curvature = self.curvature
       else:
