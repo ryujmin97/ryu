@@ -1204,18 +1204,35 @@ protected:
         }
 
         // 하단: 과속카메라 안내(szSdiDescr) 또는 도로명(szPosRoadName), 전체 폭 사용
+        // 128차: 127차 폭 축소(790->460)로 가용 폭이 420px로 줄어 긴 문구가 박스
+        // 우측 경계를 넘어갈 수 있음 -> 폭 측정 후 초과 시 폰트를 30에서 최소 20까지
+        // 2px 단위로 자동 축소(그래도 넘치면 20 유지, 잘림은 감수)
         nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+        auto fit_bottom_text_size = [&](const char* txt) {
+          int fs = 30;
+          float bounds[4];
+          float avail_w = TBT_BOX_W - 40; // 좌우 20px씩 여백
+          while (fs > 20) {
+            nvgFontSize(s->vg, fs);
+            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + 220, txt, NULL, bounds);
+            if (bounds[2] - bounds[0] <= avail_w) break;
+            fs -= 2;
+          }
+          return fs;
+        };
         if (szSdiDescr.length() > 0) {
             float bounds[4];  // [xmin, ymin, xmax, ymax]를 저장하는 배열
-            nvgFontSize(s->vg, 30);
+            int fs = fit_bottom_text_size(szSdiDescr.toStdString().c_str());
+            nvgFontSize(s->vg, fs);
             nvgTextBounds(s->vg, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), NULL, bounds);
             float text_width = bounds[2] - bounds[0];
             float text_height = bounds[3] - bounds[1];
             ui_fill_rect(s->vg, { (int)bounds[0] - 8, (int)bounds[1] - 2, (int)text_width + 16, (int)text_height + 10 }, COLOR_GREEN, 8);
-            ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), 30, COLOR_WHITE, BOLD);
+            ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
         }
         else if (szPosRoadName.length() > 0) {
-          ui_draw_text(s, tbt_x + 20, tbt_y + 220, szPosRoadName.toStdString().c_str(), 30, COLOR_WHITE, BOLD);
+          int fs = fit_bottom_text_size(szPosRoadName.toStdString().c_str());
+          ui_draw_text(s, tbt_x + 20, tbt_y + 220, szPosRoadName.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
         }
 
         return 0;
