@@ -2559,31 +2559,33 @@ public:
     }
     void drawDateTime(const UIState* s) {
         char str[128];
-        // 시간표시
+        // 시간표시 (클립영상 시간 확인용: YY-MM-DD(요일) 위 / HH:MM:SS 아래)
         int show_datetime = params.getInt("ShowDateTime");
         if (show_datetime) {
             time_t now = time(nullptr);
             struct tm* local = localtime(&now);
 
             int x = 170;// s->fb_w - 300;
-            int y = 120;// 150;
-            int nav_y = y + 50;
+            int y = 70;// 날짜 줄 기준선
+            int nav_y = y;
 
             nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
-            if (show_datetime == 1 || show_datetime == 2) {
-                strftime(str, sizeof(str), "%H:%M", local);
-                ui_draw_text(s, x, y, str, 100, COLOR_WHITE, BOLD, 3.0f, 8.0f);
-
-            }
             if (show_datetime == 1 || show_datetime == 3) {
-                //strftime(str, sizeof(str), "%m-%d-%a", local);
+                // 26-08-30(일) 형식 (연-월-일 + 요일)
                 const char* weekdays_ko[] = { "일", "월", "화", "수", "목", "금", "토" };
-                strftime(str, sizeof(str), "%m-%d", local); // 날짜만 가져옴
+                strftime(str, sizeof(str), "%y-%m-%d", local);
                 int weekday_index = local->tm_wday; // tm_wday: 0=일, 1=월, ..., 6=토
                 snprintf(str + strlen(str), sizeof(str) - strlen(str), "(%s)", weekdays_ko[weekday_index]);
 
-                ui_draw_text(s, x, y + 70, str, 60, COLOR_WHITE, BOLD, 3.0f, 8.0f);
-                nav_y += 70;
+                ui_draw_text(s, x, y, str, 45, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+                nav_y = y;
+            }
+            if (show_datetime == 1 || show_datetime == 2) {
+                // 12:30:51 형식 (시:분:초) - 날짜 줄이 있으면 그 아래에 표시
+                int time_y = (show_datetime == 1) ? y + 70 : y;
+                strftime(str, sizeof(str), "%H:%M:%S", local);
+                ui_draw_text(s, x, time_y, str, 65, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+                nav_y = time_y;
             }
             if (false && szPosRoadName.size() > 0) {
                 nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
