@@ -54,6 +54,22 @@ ROUTE_ENTRY_MARGIN_KPH = 25.0
 # 최대 속도 변화"를 계산하는 데 사용.
 ROUTE_SPEED_LOOP_DT = 0.05
 
+# [147차] carrot_navi_route()의 곡률 계산 chord(=sample*10m) 보조 샘플.
+# 기존 sample=4(40m chord)는 장거리 lookahead 매크로 형상 파악용으로
+# 그대로 유지하되, 같은 지점에서 이 값(1=10m, 네이티브 리샘플 해상도)
+# 으로도 3점 곡률을 한 번 더 계산해 더 급한(=speed_cap이 더 낮은) 쪽을
+# 채택한다. 실측 naviPaths(147차, route 우회전 실주행 로그)로 40m
+# chord 단독은 실제 R≈27m급 교차로 커브를 R≈110m급으로 평활화해
+# curvature<0.02 임계값 아래로 숨겨 nRoadLimitSpeed(사실상 무제한)
+# 클램프가 걸리는 것을 확인. 직선 구간(같은 로그, steer~0 122포인트)
+# 에서는 sample=1 재계산 curvature도 임계값(0.02) 미도달로 오탐 없음.
+# 89/90차는 이 문제를 raw navi_points 로그 부재로 직접검증 못하고
+# desiredCurvature(모델 자신의 이미 평활화된 출력) 적분 재구성이라는
+# 순환논리로 "chord 축소 효과 미미"라 오판했었음(devnotes FINDINGS.md
+# 147차 참고, 근본 원인은 raw navi_points가 아니라 carrotMan.naviPaths
+# 필드가 이미 발행 중이었는데 extract_log.py가 뽑지 않았던 것).
+ROUTE_CURVATURE_FINE_SAMPLE = 1
+
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
 def haversine(lon1, lat1, lon2, lat2):
@@ -534,12 +550,46 @@ class CarrotMan:
                 distance += distance_interval
                 p1, p2, p3 = resampled_points[i], resampled_points[i + sample], resampled_points[i + sample * 2]
                 curvature = calculate_curvature(p1, p2, p3)
-                curvatures.append(curvature)
                 speed = np.interp(abs(curvature), V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
                 if abs(curvature) < 0.02:
                   speed = max(speed, self.carrot_serv.nRoadLimitSpeed)
+                curvatures.append(curvature)
                 speeds.append(speed)
                 distances.append(distance)
+
+            # [147차] 미세(fine) chord 보조 샘플 -- 위 매크로(sample=4,
+            # 40m) 루프가 놓치는 좁은 코너(예: 교차로 우회전)를 보정.
+            # 같은 리샘플 폴리라인에 ROUTE_CURVATURE_FINE_SAMPLE(기본
+            # 10m) 간격으로 3점 곡률을 한 번 더 계산해, 같은 거리
+            # 위치에서 더 급한(=speed가 더 낮은) 쪽만 채택한다. 매크로
+            # 결과 자체를 대체하지 않으므로 장거리 lookahead 매크로
+            # 형상(직선 오탐 방지)은 그대로 유지된다.
+            sample_fine = ROUTE_CURVATURE_FINE_SAMPLE
+            if sample_fine and sample_fine < sample and len(resampled_points) >= sample_fine * 2 + 1:
+                fine_distance = 10.0
+                fine_points = []  # (distance, curvature, speed)
+                for i in range(len(resampled_points) - sample_fine * 2):
+                    fine_distance += distance_interval
+                    p1, p2, p3 = resampled_points[i], resampled_points[i + sample_fine], resampled_points[i + sample_fine * 2]
+                    f_curvature = calculate_curvature(p1, p2, p3)
+                    f_speed = np.interp(abs(f_curvature), V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+                    if abs(f_curvature) < 0.02:
+                      f_speed = max(f_speed, self.carrot_serv.nRoadLimitSpeed)
+                    fine_points.append((fine_distance, f_curvature, f_speed))
+                if fine_points:
+                    fine_idx = 0
+                    for j in range(len(distances)):
+                        d = distances[j]
+                        # distances[]와 fine_points[]는 둘 다 10m 간격
+                        # 같은 시작점이므로, 가장 가까운 fine 포인트를
+                        # 앞에서부터 순차 탐색(선형, O(n))으로 찾는다.
+                        while (fine_idx + 1 < len(fine_points)
+                               and abs(fine_points[fine_idx + 1][0] - d) <= abs(fine_points[fine_idx][0] - d)):
+                            fine_idx += 1
+                        f_dist, f_curv, f_speed = fine_points[fine_idx]
+                        if f_speed < speeds[j]:
+                            speeds[j] = f_speed
+                            curvatures[j] = f_curv
             #print(f"curvatures= {[round(s, 4) for s in curvatures]}")
             #print(f"speeds= {[round(s, 1) for s in speeds]}")
             # Apply acceleration limits in reverse to adjust speeds
