@@ -54,6 +54,19 @@ ROUTE_ENTRY_MARGIN_KPH = 25.0
 # 최대 속도 변화"를 계산하는 데 사용.
 ROUTE_SPEED_LOOP_DT = 0.05
 
+# [153차, 152차 옵션1] 근정지급(target<=이 값) 코너에 한해, 감지 시점에
+# "지금부터 등가속도로 감속하면 코너에서 정확히 target에 도달"하는 필요
+# 감속률을 계산해 아래 역방향 DP 결과 위에 직접 덮어쓴다(재귀 자체는
+# 건드리지 않음 -- 149차/150차/151차가 시도했던 "accel_limit을 부스트해
+# 같은 재귀에 주입"하는 방식은 그 재귀의 time_wait 메커니즘이 "나중에 더
+# 세게 감속 가능"이라 판단해 현재 시점 감속을 오히려 늦추는 부작용이
+# 시뮬레이션으로 확인돼(151차 NEGATIVE, devnotes FINDINGS.md 151차)
+# 배포 보류됐음). 상세 설계/시뮬레이션 검증 근거는
+# devnotes toolkit/sim_route_near_stop_accel_boost.py::carrot_navi_route_dp_forced_decel()
+# 및 FINDINGS.md 153차 참고(POSITIVE, 149차 근사/실측/극단 조건 3종
+# 전부 base 대비 개선, 일반 커브 회귀 없음 확인).
+ROUTE_NEAR_STOP_TARGET_KPH = 15.0
+
 # [147차] carrot_navi_route()의 곡률 계산 chord(=sample*10m) 보조 샘플.
 # 기존 sample=4(40m chord)는 장거리 lookahead 매크로 형상 파악용으로
 # 그대로 유지하되, 같은 지점에서 이 값(1=10m, 네이티브 리샘플 해상도)
@@ -653,6 +666,36 @@ class CarrotMan:
                 time_wait += min(2.0, time_interval)
 
                 out_speeds[i] = adjusted_speed
+
+            # [153차, 152차 옵션1] 근정지급 코너 필요감속률 초과 시 즉시 감속
+            # 강제 -- 위 역방향 DP(재귀)는 전혀 건드리지 않고, 결과 위에
+            # 후처리로 덮어쓴다. 시뮬레이션 검증(devnotes toolkit/
+            # sim_route_near_stop_accel_boost.py::carrot_navi_route_dp_forced_decel(),
+            # FINDINGS.md 153차): 149차 근사/실측/극단 조건 3종 전부 base
+            # 대비 초과속도 개선(예: 149차 근사조건 4.4kph→0.0kph), 일반
+            # 커브는 회귀 없음(diff=0). accel_limit을 재귀에 주입하는
+            # 방식(149/150/151차, 배포 보류)과 달리 이 블록은 그 재귀의
+            # time_wait 메커니즘과 완전히 독립적이라 "감속 시작 지연" 부작용이
+            # 구조적으로 발생하지 않는다.
+            min_idx = min(range(len(speeds)), key=lambda k: speeds[k])
+            if speeds[min_idx] <= ROUTE_NEAR_STOP_TARGET_KPH and distances[min_idx] > 0:
+              v_ego_ms = v_ego_kph / 3.6
+              target_ms = speeds[min_idx] / 3.6
+              required_accel_mss = max(0.0, (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * distances[min_idx]))
+              if required_accel_mss > accel_limit:
+                # 상한 클램프(vturn_decel_rate 재사용) -- 감지가 너무 늦어
+                # required_accel이 비현실적으로 커지는 경우(급브레이크급)
+                # 대비. vturn이 이미 이 정도 감속은 정상 범위로 처리하므로
+                # route도 동일 상한이면 안전측.
+                applied_accel_mss = min(required_accel_mss, self.vturn_decel_rate)
+                for i in range(min_idx + 1):
+                  dist_to_corner = max(0.0, distances[min_idx] - distances[i])
+                  forced_ms_sq = target_ms ** 2 + 2.0 * applied_accel_mss * dist_to_corner
+                  forced_kph = (forced_ms_sq ** 0.5) * 3.6 if forced_ms_sq > 0 else speeds[min_idx]
+                  out_speeds[i] = min(out_speeds[i], forced_kph)
+                # 132차 프레임간 램프리미터가 이 강제 곡선을 따라잡을 수
+                # 있도록 accel_limit_kmh도 같은 값 기준으로 상향.
+                accel_limit_kmh = max(accel_limit_kmh, applied_accel_mss * 3.6)
 
             #distance_advance = self.sm['carState'].vEgo * 3.0  # Advance distance by 3.0 seconds
             #out_speed = interp(distance_advance, distances, out_speeds)
