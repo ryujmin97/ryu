@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <string>
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1114,7 +1115,8 @@ protected:
     // 100차 이전: 폭 790px (화면 절반 가까이 차지, 차량 시야 가림 큼)
     // 변경: 폭만 460px로 축소 (높이 300px는 유지 — 목표 크기 실측 결과 폭 차이가 지배적)
     static constexpr int TBT_BOX_W = 460;   // 기존 790
-    static constexpr int TBT_BOX_H = 300;   // 기존과 동일 (240+60)
+    static constexpr int TBT_BOX_H = 340;   // 154차: 300->340. 하단 도로명/route 텍스트가
+                                             // 1줄->2줄로 늘어나며 필요한 세로 여백 40px 추가
     static constexpr int TBT_MARGIN_R = 10; // 우측 여백 (기존과 동일)
     static constexpr int TBT_ICON_SIZE = 140; // 기존 icon_size(256) 대신 축소 전용 크기 사용
 
@@ -1231,8 +1233,43 @@ protected:
             ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
         }
         else if (szPosRoadName.length() > 0) {
-          int fs = fit_bottom_text_size(szPosRoadName.toStdString().c_str());
-          ui_draw_text(s, tbt_x + 20, tbt_y + 220, szPosRoadName.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
+          // 154차: 도로명(1줄) + route=NN.N(2줄)로 분리해서 그림.
+          // 파이썬(carrot_serv.py)에서 '\n'으로 구분해서 보내주므로 여기서 split.
+          // route= 뒤 숫자만 초록색 + 2배 크기로 강조.
+          std::string full = szPosRoadName.toStdString();
+          size_t nl = full.find('\n');
+          std::string line1 = (nl == std::string::npos) ? full : full.substr(0, nl);
+          std::string line2 = (nl == std::string::npos) ? "" : full.substr(nl + 1);
+
+          // 1줄: 도로명
+          if (line1.length() > 0) {
+            int fs1 = fit_bottom_text_size(line1.c_str());
+            ui_draw_text(s, tbt_x + 20, tbt_y + 195, line1.c_str(), fs1, COLOR_WHITE, BOLD);
+          }
+
+          // 2줄: "route=" + 숫자(강조)
+          if (line2.length() > 0) {
+            size_t eq = line2.find('=');
+            std::string prefix = (eq == std::string::npos) ? line2 : line2.substr(0, eq + 1); // "route="
+            std::string number = (eq == std::string::npos) ? "" : line2.substr(eq + 1);        // "145.1"
+
+            const int fs_prefix = 26;      // 기존 하단 텍스트와 비슷한 크기
+            const int fs_number = fs_prefix * 2; // 요청사항: 숫자만 2배 크기
+            float line2_y = tbt_y + 235; // 1줄 아래 여백(약 40px)
+
+            float px = tbt_x + 20;
+            if (prefix.length() > 0) {
+              nvgFontSize(s->vg, fs_prefix);
+              nvgFontFace(s->vg, BOLD);
+              float bounds[4];
+              nvgTextBounds(s->vg, px, line2_y, prefix.c_str(), NULL, bounds);
+              ui_draw_text(s, px, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
+              px = bounds[2]; // prefix 뒤에 이어서 숫자 시작
+            }
+            if (number.length() > 0) {
+              ui_draw_text(s, px, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
+            }
+          }
         }
 
         return 0;

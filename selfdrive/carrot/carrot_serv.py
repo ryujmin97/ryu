@@ -1149,7 +1149,10 @@ class CarrotServ:
     msg.carrotMan.xTurnCountDown = int(left_tbt_sec)
     msg.carrotMan.atcType = self.atcType
     msg.carrotMan.vTurnSpeed = int(vturn_speed)
-    msg.carrotMan.szPosRoadName = self.szPosRoadName + self.debugText
+    # 154차: 도로명과 디버그(route=) 텍스트를 '\n'으로 구분해서 보냄.
+    # UI(carrot.cc)에서 두 줄로 나눠 그리고, route= 뒤 숫자만 강조 표시하기 위함.
+    # (기존엔 이어붙여서 한 줄 문자열로 보냈음 -> UI에서 줄바꿈 파싱 불가)
+    msg.carrotMan.szPosRoadName = self.szPosRoadName + (("\n" + self.debugText) if self.debugText else "")
     msg.carrotMan.szTBTMainText = self.szTBTMainText
     msg.carrotMan.desiredSpeed = int(desired_speed)
     msg.carrotMan.desiredSource = source
