@@ -43,29 +43,24 @@ NetworkType = log.DeviceState.NetworkType
 #V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 45, 35, 30]
 V_CURVE_LOOKUP_BP = [0., 1./800., 1./670., 1./560., 1./440., 1./360., 1./265., 1./190., 1./135., 1./85., 1./55., 1./30., 1./25.]
 V_CRUVE_LOOKUP_VALS = [300, 150, 120, 110, 100, 90, 80, 70, 60, 50, 40, 15, 5]
-# [91차] carrot_navi_route()의 역방향 DP 감속 전환 시점에서 route가 vturn보다
-# 먼저 사전감속을 시작하도록 목표속도를 이만큼 더 낮게 취급(km/h). 89차 대안3
-# ("안전마진 휴리스틱")을 시뮬레이션 검증(커브A/B + 직선 154초) 후 확정.
-ROUTE_ENTRY_MARGIN_KPH = 25.0
-
 # [132차] carrot_navi_route()가 호출되는 broadcast_version_info()의
 # Ratekeeper(20) 주기(초). Hypothesis C(131차) 대응 프레임간 램프
 # 리미터에서 accel_limit_kmh와 곱해 "이 주기 동안 물리적으로 허용되는
 # 최대 속도 변화"를 계산하는 데 사용.
 ROUTE_SPEED_LOOP_DT = 0.05
 
-# [153차, 152차 옵션1] 근정지급(target<=이 값) 코너에 한해, 감지 시점에
-# "지금부터 등가속도로 감속하면 코너에서 정확히 target에 도달"하는 필요
-# 감속률을 계산해 아래 역방향 DP 결과 위에 직접 덮어쓴다(재귀 자체는
-# 건드리지 않음 -- 149차/150차/151차가 시도했던 "accel_limit을 부스트해
-# 같은 재귀에 주입"하는 방식은 그 재귀의 time_wait 메커니즘이 "나중에 더
-# 세게 감속 가능"이라 판단해 현재 시점 감속을 오히려 늦추는 부작용이
-# 시뮬레이션으로 확인돼(151차 NEGATIVE, devnotes FINDINGS.md 151차)
-# 배포 보류됐음). 상세 설계/시뮬레이션 검증 근거는
-# devnotes toolkit/sim_route_near_stop_accel_boost.py::carrot_navi_route_dp_forced_decel()
-# 및 FINDINGS.md 153차 참고(POSITIVE, 149차 근사/실측/극단 조건 3종
-# 전부 base 대비 개선, 일반 커브 회귀 없음 확인).
-ROUTE_NEAR_STOP_TARGET_KPH = 15.0
+# [157차, 사용자 제안 재설계] 곡률이 이 값 미만이면 "진짜 노이즈 수준의
+# 직선"으로 보고 nRoadLimitSpeed로 플로어(=사실상 무제한)한다. 기존
+# 0.02(R≈50m)는 V_CURVE_LOOKUP 테이블상 이미 curvature 0.009~0.018
+# 구간이 45~56km/h급 커브로 계산되는데도 그 값을 통째로 버리고
+# 도로제한속도로 되돌리는 과도한 임계값이었음(156차가 실측으로 확인 --
+# 연속 완만한 굽이길 curvature 0.002~0.013이 전부 이 플로어에 걸려
+# route= 표시가 16초+ 고정, 실제로는 vturn이 대신 감속 중이었음).
+# 0.001(R≈1000m)로 낮춰 "진짜 직선 GPS 노이즈"만 걸러내고, 그보다 조금이라도
+# 뚜렷한 곡률은 테이블 값을 그대로 신뢰한다. 검증: devnotes
+# toolkit/sim_route_apex_redesign.py(157차, 직선도로 시나리오 오탐 없음
+# 확인, PASS).
+ROUTE_CURVE_NEGLIGIBLE_THRESHOLD = 0.001
 
 # [147차] carrot_navi_route()의 곡률 계산 chord(=sample*10m) 보조 샘플.
 # 기존 sample=4(40m chord)는 장거리 lookahead 매크로 형상 파악용으로
@@ -564,7 +559,7 @@ class CarrotMan:
                 p1, p2, p3 = resampled_points[i], resampled_points[i + sample], resampled_points[i + sample * 2]
                 curvature = calculate_curvature(p1, p2, p3)
                 speed = np.interp(abs(curvature), V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
-                if abs(curvature) < 0.02:
+                if abs(curvature) < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
                   speed = max(speed, self.carrot_serv.nRoadLimitSpeed)
                 curvatures.append(curvature)
                 speeds.append(speed)
@@ -586,7 +581,7 @@ class CarrotMan:
                     p1, p2, p3 = resampled_points[i], resampled_points[i + sample_fine], resampled_points[i + sample_fine * 2]
                     f_curvature = calculate_curvature(p1, p2, p3)
                     f_speed = np.interp(abs(f_curvature), V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
-                    if abs(f_curvature) < 0.02:
+                    if abs(f_curvature) < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
                       f_speed = max(f_speed, self.carrot_serv.nRoadLimitSpeed)
                     fine_points.append((fine_distance, f_curvature, f_speed))
                 if fine_points:
@@ -605,102 +600,59 @@ class CarrotMan:
                             curvatures[j] = f_curv
             #print(f"curvatures= {[round(s, 4) for s in curvatures]}")
             #print(f"speeds= {[round(s, 1) for s in speeds]}")
-            # Apply acceleration limits in reverse to adjust speeds
+            # [157차, 사용자 제안 재설계] 기존 "포인트별 backward accel-limited
+            # DP(ROUTE_ENTRY_MARGIN_KPH/time_wait 스케줄링, 91차) + 153차 근정지
+            # 후처리"를 "다음 apex(=lookahead 내 최소속도 지점)까지의 거리
+            # 하나로 결정하는 물리공식"으로 전면 교체.
+            #
+            # 배경(FINDINGS.md 157차, 156차 후속): 156차가 발견한 "route=
+            # HUD 16초+ 고정" 현상의 근본 원인은 147차가 고친 coarse chord
+            # 문제가 아니라 위 곡률 루프의 "curvature<threshold면 무조건
+            # nRoadLimitSpeed로 되돌리는" 플로어 임계값 자체가 과도하게
+            # 넓었던 것(0.02 -> ROUTE_CURVE_NEGLIGIBLE_THRESHOLD=0.001로
+            # 위에서 이미 축소). 사용자 제안: "route의 역할은 사전에
+            # GPS 경로로 다음 최대곡률(apex) 지점까지의 거리만 보고
+            # 미리 감속하는 것 -- 정점 이후는 vturn(비전)에 맡기고, 통과
+            # 즉시 다음 apex를 다시 찾는다"로 단순화. 이 함수가 매 20Hz
+            # 마다 lookahead 윈도우를 새로 계산하는 무상태(stateless)
+            # 구조이므로, "정점 통과 후 리셋"은 다음 프레임에 윈도우가
+            # 전진하며 자동으로 이뤄진다(별도 상태 불필요) -- "vturn에
+            # 넘김"도 기존 min() arbitration으로 이미 성립(apex 근방에서
+            # route가 vturn보다 낮은 값을 낼 이유가 없어짐).
+            #
+            # 153차(근정지급 코너 한정 강제감속)의 물리공식이 이 설계의
+            # 특수사례로 흡수되므로 그 후처리 블록은 별도로 필요 없다.
+            # v1 단순화: 91차 ROUTE_ENTRY_MARGIN_KPH(route가 vturn보다
+            # 먼저 개입하도록 당기는 마진)는 이번엔 포함하지 않음 --
+            # 실측 후 필요성 재평가 예정(FINDINGS.md 157차 "알려진
+            # 단순화" 참고).
+            #
+            # 사전검증: devnotes toolkit/sim_route_apex_redesign.py(157차)
+            # -- 156차 재현 굽이길(baseline 무반응 확인 후 apex 재설계는
+            # 정상 감속)/직선 회귀없음/147차류 단일커브/152·153차 근정지
+            # 4개 시나리오 7/7 PASS.
             accel_limit = self.carrot_serv.autoNaviSpeedDecelRate # m/s^2
-            accel_limit_kmh = accel_limit * 3.6  # Convert to km/h per second
-            out_speeds = [0] * len(speeds)
-            out_speeds[-1] = speeds[-1]  # Set the last speed as the initial value
             v_ego_kph = self.sm['carState'].vEgo * 3.6
 
-            time_delay = self.carrot_serv.autoNaviSpeedCtrlEnd
-            time_wait = 0
-            # [82차] route 원복(가속 재개) 측에 vturn과 동일한 "차량 반응 지연 보상용
-            # safe_time 버퍼"를 대칭 적용한다. 진입측(time_delay) 공식은 이미 순수
-            # 물리 도달시간만으로 조기감속을 정확히 계산하고 있어 그대로 둔다 --
-            # [수정] 최초 구현 시 진입측에도 동일하게 +vturn_safe_time을 더했었으나,
-            # 검증 결과 그 진입측 추가 지연(debt)이 실제 커브 구간 통과 중(out_speed가
-            # target에 고정되어 클리핑되는 구간) 고스란히 누적되어 있다가, 아래 원복
-            # 크레딧(+vturn_safe_time)에서 정확히 상쇄되어(부호 반대, 크기 동일) 최종
-            # 출력이 원본과 100% 동일해지는(=패치가 사실상 무효화되는) 버그가
-            # 시뮬레이션(work/test_route_recovery2.py)으로 확인됨 -- 진입측 변경 제거,
-            # 원복측 크레딧만 남김. 원복 시점 판정도 "decel 트리거 직후 첫 지점"이
-            # 아니라 실제로 target_speed가 next_out_speed를 넘어서는(=커브를 실제로
-            # 빠져나가는) 지점으로 엄격화(strict) -- 커브 내부(target==next_out 정체
-            # 구간)에서 조기 발동하지 않도록 함.
-            route_prev_state = None  # 'decel' | 'accel'
-            for i in range(len(speeds) - 2, -1, -1):
-                target_speed = speeds[i]
-                next_out_speed = out_speeds[i + 1]
-
-                if target_speed < next_out_speed:
-                  # [91차] route가 vturn보다 사전감속을 더 일찍 시작하도록, 감속 전환
-                  # 시점의 목표속도(target_speed)를 실제보다 ROUTE_ENTRY_MARGIN_KPH만큼
-                  # 더 낮게 취급해 time_delay(=필요 소요시간)를 부풀린다. 최종 채택되는
-                  # target_speed 자체(min(target_speed, max_allowed_speed))는 바꾸지
-                  # 않으므로 커브 정점에서의 목표값은 그대로 -- 오직 "언제부터 감속
-                  # 스케줄을 당겨서 반영하기 시작할지"만 앞당김.
-                  # 시뮬레이션 검증(devnotes work): 커브A(완만한 램프)에서 vturn 실제
-                  # 전환보다 4.26초 먼저 개입, 최종값도 vturn 실측치(73~77)에 근접(79).
-                  # 커브B(급한 램프+교차로)/직선 154초 구간 둘 다 오탐(불필요 조기개입)
-                  # 없음 확인. margin_kph=25는 검증한 20/30 사이 절충값(사용자 결정).
-                  margin_target_speed = max(0.0, target_speed - ROUTE_ENTRY_MARGIN_KPH)
-                  time_delay = max(0, ((v_ego_kph - margin_target_speed) / accel_limit_kmh))
-                  time_wait = - time_delay
-                  route_prev_state = 'decel'
-                elif target_speed > next_out_speed and route_prev_state == 'decel':
-                  # 감속 구간이 끝나고 실제로 다시 가속해야 하는 첫 지점(원복 시작) --
-                  # 진입측과 대칭으로 동일 버퍼를 한 번만 얹어 회복을 앞당긴다.
-                  time_wait += self.vturn_safe_time
-                  route_prev_state = 'accel'
-
-                # Calculate time interval for the current segment based on speed
-                time_interval = distance_interval / (next_out_speed / 3.6) if next_out_speed > 0 else 0
-
-                time_apply = min(time_interval, max(0, time_interval + time_wait))
-
-                # Calculate maximum allowed speed with acceleration limit
-                max_allowed_speed = next_out_speed + (accel_limit_kmh * time_apply)
-                adjusted_speed = min(target_speed, max_allowed_speed)
-
-                #time_wait += time_interval
-                time_wait += min(2.0, time_interval)
-
-                out_speeds[i] = adjusted_speed
-
-            # [153차, 152차 옵션1] 근정지급 코너 필요감속률 초과 시 즉시 감속
-            # 강제 -- 위 역방향 DP(재귀)는 전혀 건드리지 않고, 결과 위에
-            # 후처리로 덮어쓴다. 시뮬레이션 검증(devnotes toolkit/
-            # sim_route_near_stop_accel_boost.py::carrot_navi_route_dp_forced_decel(),
-            # FINDINGS.md 153차): 149차 근사/실측/극단 조건 3종 전부 base
-            # 대비 초과속도 개선(예: 149차 근사조건 4.4kph→0.0kph), 일반
-            # 커브는 회귀 없음(diff=0). accel_limit을 재귀에 주입하는
-            # 방식(149/150/151차, 배포 보류)과 달리 이 블록은 그 재귀의
-            # time_wait 메커니즘과 완전히 독립적이라 "감속 시작 지연" 부작용이
-            # 구조적으로 발생하지 않는다.
-            min_idx = min(range(len(speeds)), key=lambda k: speeds[k])
-            if speeds[min_idx] <= ROUTE_NEAR_STOP_TARGET_KPH and distances[min_idx] > 0:
+            apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])
+            apex_dist = distances[apex_idx]
+            apex_speed = speeds[apex_idx]
+            if apex_dist > 0:
               v_ego_ms = v_ego_kph / 3.6
-              target_ms = speeds[min_idx] / 3.6
-              required_accel_mss = max(0.0, (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * distances[min_idx]))
-              if required_accel_mss > accel_limit:
-                # 상한 클램프(vturn_decel_rate 재사용) -- 감지가 너무 늦어
-                # required_accel이 비현실적으로 커지는 경우(급브레이크급)
-                # 대비. vturn이 이미 이 정도 감속은 정상 범위로 처리하므로
-                # route도 동일 상한이면 안전측.
-                applied_accel_mss = min(required_accel_mss, self.vturn_decel_rate)
-                for i in range(min_idx + 1):
-                  dist_to_corner = max(0.0, distances[min_idx] - distances[i])
-                  forced_ms_sq = target_ms ** 2 + 2.0 * applied_accel_mss * dist_to_corner
-                  forced_kph = (forced_ms_sq ** 0.5) * 3.6 if forced_ms_sq > 0 else speeds[min_idx]
-                  out_speeds[i] = min(out_speeds[i], forced_kph)
-                # 132차 프레임간 램프리미터가 이 강제 곡선을 따라잡을 수
-                # 있도록 accel_limit_kmh도 같은 값 기준으로 상향.
-                accel_limit_kmh = max(accel_limit_kmh, applied_accel_mss * 3.6)
-
-            #distance_advance = self.sm['carState'].vEgo * 3.0  # Advance distance by 3.0 seconds
-            #out_speed = interp(distance_advance, distances, out_speeds)
-            out_speed = out_speeds[0]
-            #print(f"out_speeds= {[round(s, 1) for s in out_speeds]}")
+              target_ms = apex_speed / 3.6
+              required_accel_mss = max(0.0, (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * apex_dist))
+              # 여유가 있으면(필요감속률이 accel_limit 이하) accel_limit로,
+              # 감지가 늦었으면(필요감속률 > accel_limit) vturn_decel_rate를
+              # 상한으로 부스트(153차와 동일 클램프 -- 급브레이크급 방지).
+              applied_accel_mss = accel_limit if required_accel_mss <= accel_limit \
+                else min(required_accel_mss, self.vturn_decel_rate)
+              out_ms_sq = target_ms ** 2 + 2.0 * applied_accel_mss * apex_dist
+              out_speed = (out_ms_sq ** 0.5) * 3.6 if out_ms_sq > 0 else apex_speed
+              out_speed = min(out_speed, 300.0)
+              accel_limit_kmh = applied_accel_mss * 3.6
+            else:
+              out_speed = apex_speed
+              accel_limit_kmh = accel_limit * 3.6
 
             # [132차, Hypothesis C(131차) 대응] route_lookahead_m 윈도우
             # 경계로 급커브 지점이 이산적으로 curvature 배열에 "출현"하는
