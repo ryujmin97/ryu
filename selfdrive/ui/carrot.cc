@@ -1247,7 +1247,7 @@ protected:
             ui_draw_text(s, tbt_x + 20, tbt_y + 195, line1.c_str(), fs1, COLOR_WHITE, BOLD);
           }
 
-          // 2줄: "route=" + 숫자(강조)
+          // 2줄: "route=" + 숫자(강조) -- 156차: 숫자를 박스 오른쪽 끝에 정렬
           if (line2.length() > 0) {
             size_t eq = line2.find('=');
             std::string prefix = (eq == std::string::npos) ? line2 : line2.substr(0, eq + 1); // "route="
@@ -1256,18 +1256,17 @@ protected:
             const int fs_prefix = 26;      // 기존 하단 텍스트와 비슷한 크기
             const int fs_number = fs_prefix * 2; // 요청사항: 숫자만 2배 크기
             float line2_y = tbt_y + 235; // 1줄 아래 여백(약 40px)
+            float right_edge = tbt_x + TBT_BOX_W - 20; // 박스 우측 여백 20px
 
-            float px = tbt_x + 20;
             if (prefix.length() > 0) {
-              nvgFontSize(s->vg, fs_prefix);
-              nvgFontFace(s->vg, BOLD);
-              float bounds[4];
-              nvgTextBounds(s->vg, px, line2_y, prefix.c_str(), NULL, bounds);
-              ui_draw_text(s, px, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
-              px = bounds[2]; // prefix 뒤에 이어서 숫자 시작
+              nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+              ui_draw_text(s, tbt_x + 20, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
             }
             if (number.length() > 0) {
-              ui_draw_text(s, px, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
+              // 숫자만 우측 정렬로 박스 오른쪽 끝에 맞춤
+              nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+              ui_draw_text(s, right_edge, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
+              nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM); // 다음 루프/블록 위해 원복
             }
           }
         }
@@ -2597,6 +2596,9 @@ public:
     void drawDateTime(const UIState* s) {
         char str[128];
         // 시간표시 (클립영상 시간 확인용: YY-MM-DD(요일) 위 / HH:MM:SS 아래)
+        // 155차: 날짜가 안 나오는 문제 발생 -> 파라미터(ShowDateTime)가 2(시간만)로
+        // 설정되어 있던 것이 원인으로 확인됨(코드 버그 아님). 설정에서 1(Time/Date)로
+        // 변경 후 정상 동작 확인. 아래는 파라미터값 그대로 존중하는 원래 로직으로 복원.
         int show_datetime = params.getInt("ShowDateTime");
         if (show_datetime) {
             time_t now = time(nullptr);
