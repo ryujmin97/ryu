@@ -600,59 +600,54 @@ class CarrotMan:
                             curvatures[j] = f_curv
             #print(f"curvatures= {[round(s, 4) for s in curvatures]}")
             #print(f"speeds= {[round(s, 1) for s in speeds]}")
-            # [157차, 사용자 제안 재설계] 기존 "포인트별 backward accel-limited
-            # DP(ROUTE_ENTRY_MARGIN_KPH/time_wait 스케줄링, 91차) + 153차 근정지
-            # 후처리"를 "다음 apex(=lookahead 내 최소속도 지점)까지의 거리
-            # 하나로 결정하는 물리공식"으로 전면 교체.
+            # [160차, 사용자 설계 전면 교체 -- 곡선_가감속_코딩.txt +
+            # 곡선_개념도.pdf] 157차의 "apex까지 거리로 accel_limit을
+            # 동적 부스트(필요감속률> accel_limit이면 vturn_decel_rate까지
+            # 상한 부스트)"하던 커스텀 공식을 폐기하고, **과속카메라
+            # 감속(carrot_serv.calculate_current_speed)과 완전히 동일한
+            # 물리공식을 그대로 재사용**하는 것으로 교체.
             #
-            # 배경(FINDINGS.md 157차, 156차 후속): 156차가 발견한 "route=
-            # HUD 16초+ 고정" 현상의 근본 원인은 147차가 고친 coarse chord
-            # 문제가 아니라 위 곡률 루프의 "curvature<threshold면 무조건
-            # nRoadLimitSpeed로 되돌리는" 플로어 임계값 자체가 과도하게
-            # 넓었던 것(0.02 -> ROUTE_CURVE_NEGLIGIBLE_THRESHOLD=0.001로
-            # 위에서 이미 축소). 사용자 제안: "route의 역할은 사전에
-            # GPS 경로로 다음 최대곡률(apex) 지점까지의 거리만 보고
-            # 미리 감속하는 것 -- 정점 이후는 vturn(비전)에 맡기고, 통과
-            # 즉시 다음 apex를 다시 찾는다"로 단순화. 이 함수가 매 20Hz
-            # 마다 lookahead 윈도우를 새로 계산하는 무상태(stateless)
-            # 구조이므로, "정점 통과 후 리셋"은 다음 프레임에 윈도우가
-            # 전진하며 자동으로 이뤄진다(별도 상태 불필요) -- "vturn에
-            # 넘김"도 기존 min() arbitration으로 이미 성립(apex 근방에서
-            # route가 vturn보다 낮은 값을 낼 이유가 없어짐).
+            # 배경: "route 감속의 목적은 Vturn(비전) 감속만으로는 부족한
+            # 사전감속" -- apex(최대곡률지점) 목표속도를 과속카메라의
+            # 제한속도처럼 취급해, 카메라와 동일하게 서서히 감속 ->
+            # apex 도달(거리<=0) 시 원복하는 형태로 단순화한다.
+            # apex 선택 기준은 157차와 동일하게 "가장 급한 지점"(lookahead
+            # 내 목표속도 최저점)을 유지 -- 순차(1차->2차) 처리를 위한 별도
+            # 상태는 도입하지 않는다. 이 함수가 매 20Hz마다 lookahead
+            # 윈도우를 새로 계산하는 무상태(stateless) 구조이므로,
+            # "1차 apex를 지나면(=1차 지점이 차량 뒤로 빠져 윈도우에서
+            # 사라지면) 다음 프레임에 자동으로 2차 apex가 새로 선택"된다
+            # (158~159차가 명시적 히스테리시스 상태를 시도했다가 실측
+            # 악화로 폐기한 전례가 있어, 이번에도 상태를 새로 만들지
+            # 않고 기존 무상태 원칙을 유지 -- FINDINGS.md 159차 참고).
             #
-            # 153차(근정지급 코너 한정 강제감속)의 물리공식이 이 설계의
-            # 특수사례로 흡수되므로 그 후처리 블록은 별도로 필요 없다.
-            # v1 단순화: 91차 ROUTE_ENTRY_MARGIN_KPH(route가 vturn보다
-            # 먼저 개입하도록 당기는 마진)는 이번엔 포함하지 않음 --
-            # 실측 후 필요성 재평가 예정(FINDINGS.md 157차 "알려진
-            # 단순화" 참고).
+            # calculate_current_speed(left_dist, safe_speed_kph, safe_time,
+            # safe_decel_rate)는 decel_dist(=left_dist-safe_speed*safe_time)
+            # 가 0 이하면 함수 내부에서 자동으로 safe_speed_kph를 반환하므로,
+            # 기존의 "apex_dist>0/else" 수동 분기와 동적 accel 부스트 분기가
+            # 전부 불필요해져 제거했다. v_ego는 카메라 공식과 마찬가지로
+            # 아예 쓰지 않는다(거리만으로 결정).
             #
-            # 사전검증: devnotes toolkit/sim_route_apex_redesign.py(157차)
-            # -- 156차 재현 굽이길(baseline 무반응 확인 후 apex 재설계는
-            # 정상 감속)/직선 회귀없음/147차류 단일커브/152·153차 근정지
-            # 4개 시나리오 7/7 PASS.
-            accel_limit = self.carrot_serv.autoNaviSpeedDecelRate # m/s^2
-            v_ego_kph = self.sm['carState'].vEgo * 3.6
-
-            apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])
+            # 사전검증: devnotes toolkit/sim_route_camera_style_decel.py
+            # (160차) -- 156차류 연속 굽이길/직선 회귀없음/147차류 단일
+            # 커브/152·153차 근정지/연속 S자커브(2차가 더 급한 경우 +
+            # 1차가 더 급해 apex가 전환되는 경우 둘 다) 7/7 PASS, 132차
+            # 램프리미터 이론상한(accel_limit_kmh*dt) 내에서 톱니 진동
+            # 없이 apex 전환됨을 확인.
+            apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])  # 가장 급한 지점
             apex_dist = distances[apex_idx]
             apex_speed = speeds[apex_idx]
-            if apex_dist > 0:
-              v_ego_ms = v_ego_kph / 3.6
-              target_ms = apex_speed / 3.6
-              required_accel_mss = max(0.0, (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * apex_dist))
-              # 여유가 있으면(필요감속률이 accel_limit 이하) accel_limit로,
-              # 감지가 늦었으면(필요감속률 > accel_limit) vturn_decel_rate를
-              # 상한으로 부스트(153차와 동일 클램프 -- 급브레이크급 방지).
-              applied_accel_mss = accel_limit if required_accel_mss <= accel_limit \
-                else min(required_accel_mss, self.vturn_decel_rate)
-              out_ms_sq = target_ms ** 2 + 2.0 * applied_accel_mss * apex_dist
-              out_speed = (out_ms_sq ** 0.5) * 3.6 if out_ms_sq > 0 else apex_speed
-              out_speed = min(out_speed, 300.0)
-              accel_limit_kmh = applied_accel_mss * 3.6
-            else:
-              out_speed = apex_speed
-              accel_limit_kmh = accel_limit * 3.6
+
+            out_speed = self.carrot_serv.calculate_current_speed(
+                apex_dist,
+                apex_speed,
+                self.carrot_serv.autoNaviSpeedCtrlEnd,    # safe_time -- 카메라와 동일 파라미터 재사용
+                self.carrot_serv.autoNaviSpeedDecelRate,  # safe_decel_rate -- 카메라와 동일 파라미터 재사용
+            )
+            out_speed = min(out_speed, 300.0)
+            # accel_limit_kmh는 더 이상 동적으로 변하지 않으므로(부스트 폐기)
+            # 고정값 -- 아래 132차 램프리미터가 그대로 사용.
+            accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
 
             # [132차, Hypothesis C(131차) 대응] route_lookahead_m 윈도우
             # 경계로 급커브 지점이 이산적으로 curvature 배열에 "출현"하는
