@@ -138,6 +138,9 @@ class CarrotServ:
 
     self.diff_angle_count = 0
     self.last_calculate_gps_time = 0
+    # [166차] CC.orientationNED 델타앵커링 헤딩보정 상태
+    self.cc_yaw_at_fix = None
+    self._prev_fix_time_for_heading = 0
     self.last_update_gps_time = 0
     self.last_update_gps_time_phone = 0
     self.last_update_gps_time_navi = 0
@@ -726,7 +729,22 @@ class CarrotServ:
       bearing = self.nPosAngle = gps.bearingDeg
 
     self.bearing_offset = 0.0
-    # TODO:  여기서 bearing 보정로직 추가 필요함. CC.orientationNED[2]를 이용하여.
+
+    # [166차] CC.orientationNED[2] 델타앵커링 헤딩보정 (TODO 해결, 방향1)
+    # - 절대값 대입이 아니라 마지막 fix 시점 기준 상대회전(Δyaw)만 반영해
+    #   locationd 드리프트에 안전하게 설계 (FINDINGS.md 165/166차 참고).
+    # - "새 fix 도착"은 last_calculate_gps_time 변화로 간접 감지.
+    heading_correction_deg = 0.0
+    ned = list(CC.orientationNED)
+    cc_pose_valid = len(ned) > 2
+    if cc_pose_valid:
+      cc_yaw_now = ned[2]
+      if self.last_calculate_gps_time != self._prev_fix_time_for_heading:  # 새 fix 도착
+        self.cc_yaw_at_fix = cc_yaw_now
+      self._prev_fix_time_for_heading = self.last_calculate_gps_time
+      if self.cc_yaw_at_fix is not None:
+        dyaw = (cc_yaw_now - self.cc_yaw_at_fix + math.pi) % (2 * math.pi) - math.pi
+        heading_correction_deg = math.degrees(dyaw)
 
     #print(f"bearing = {bearing:.1f}, posA=={self.nPosAngle:.1f}, posP=={self.nPosAnglePhone:.1f}, offset={self.bearing_offset:.1f}, {gps_updated_phone}, {gps_updated_navi}")
     gpsDelayTimeAdjust = 0.0
@@ -752,7 +770,7 @@ class CarrotServ:
           diff_angle -= 360
         self.bearing_offset = self.bearing_offset * 0.9 + diff_angle * 0.1
 
-    bearing_calculated = (bearing + self.bearing_offset) % 360
+    bearing_calculated = (bearing + self.bearing_offset + heading_correction_deg) % 360
 
     dt = now - self.last_calculate_gps_time
     # [162차] carrot_navi_route()의 route_speed 램프리미터 위치불확실성
