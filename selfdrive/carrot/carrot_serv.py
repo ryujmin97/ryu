@@ -141,6 +141,9 @@ class CarrotServ:
     # [166차] CC.orientationNED 델타앵커링 헤딩보정 상태
     self.cc_yaw_at_fix = None
     self._prev_fix_time_for_heading = 0
+    # [167차] 163차 게이트 조건 좁히기용 -- _update_gps 최초 호출 전
+    # 기본값은 False(안전측, 방향2가 정상 발동 가능한 상태로 시작)
+    self.cc_pose_valid = False
     self.last_update_gps_time = 0
     self.last_update_gps_time_phone = 0
     self.last_update_gps_time_navi = 0
@@ -737,6 +740,9 @@ class CarrotServ:
     heading_correction_deg = 0.0
     ned = list(CC.orientationNED)
     cc_pose_valid = len(ned) > 2
+    # [167차] 163차 위치불확실성 게이트(방향2)가 "방향1이 무력화되는
+    # 폴백 구간에서만" 발동하도록 좁히기 위해 노출.
+    self.cc_pose_valid = cc_pose_valid
     if cc_pose_valid:
       cc_yaw_now = ned[2]
       if self.last_calculate_gps_time != self._prev_fix_time_for_heading:  # 새 fix 도착

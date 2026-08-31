@@ -96,6 +96,14 @@ ROUTE_CURVATURE_FINE_SAMPLE = 1
 # 3.0s는 carrot_serv.py의 gps_updated_navi/gps_updated_phone 신선도
 # 판정과 동일한 관례값(_update_gps() L713-714)을 그대로 재사용.
 # 사전검증: devnotes toolkit/sim_route_position_uncertainty_gate.py(162차).
+#
+# [167차, 병행조건 좁힘] 166차 헤딩보정(방향1, CC.orientationNED 델타앵커링)이
+# 실차검증 전 단계에서 이 게이트(방향2)와 병행하기로 결정됨(사용자 지시).
+# 다만 방향1이 정상 동작 중(cc_pose_valid=True)이면 방향1 자체가 이 문제를
+# 이미 해결하므로 방향2까지 겹쳐 켜두면 완화(상승) 방향이 불필요하게
+# 과도 억제됨(트레이드오프 논의 FINDINGS.md 167차 참고) -- 따라서 실제
+# 적용부(아래 사용처)에서는 cc_pose_valid=False(방향1이 무력화되는 폴백,
+# 예: 캘리브레이션 미완료)일 때만 이 게이트가 발동하도록 조건을 좁혔다.
 ROUTE_POSITION_UNCERTAIN_DT_S = 3.0
 
 # Haversine formula to calculate distance between two GPS coordinates
@@ -695,7 +703,14 @@ class CarrotMan:
               # 값으로 고정 -- curvature 오판으로 인한 "가짜 직선" 판정이
               # route_speed를 300 쪽으로 밀어올리지 못하게 막는다. 하강
               # 쪽(lo)은 그대로 둬 실제 감속 필요는 계속 반영한다.
-              if self.carrot_serv.position_dt_since_fix > ROUTE_POSITION_UNCERTAIN_DT_S:
+              # [167차] 166차 헤딩보정(방향1)이 CC.orientationNED로 이미
+              # 이 상황을 커버하므로, 방향1이 무력화되는 폴백 구간
+              # (cc_pose_valid=False -- 캘리브레이션 미완료 등)에서만
+              # 이 게이트(방향2)가 안전망으로 발동하도록 조건을 좁힘.
+              # 방향1이 정상 동작 중(cc_pose_valid=True)이면 방향2는
+              # 물러나 route가 정확해진 curvature를 그대로 따라가게 둔다.
+              if (self.carrot_serv.position_dt_since_fix > ROUTE_POSITION_UNCERTAIN_DT_S
+                  and not self.carrot_serv.cc_pose_valid):
                 hi = self._route_speed_prev
               out_speed = min(max(out_speed, lo), hi)
             self._route_speed_prev = out_speed
