@@ -41,6 +41,23 @@ A_EGO_COST = 0.
 J_EGO_COST = 5.0
 A_CHANGE_COST = 200.
 A_CHANGE_COST_STARTING = 10. #30.
+
+# 177차(설계): 176차 원인B 가설(리드없는 cruise 모드에서 A_CHANGE_COST=200
+# 고정이 route 감속 스케줄 추종을 구조적으로 지연시킨다 -- FINDINGS.md 174/176차)
+# 검증 완료 후 대응 패치. 리드 케이스의 `np.interp(abs(j_lead), [0.3, 2.0], [200, 20])`
+# (L1328 부근)와 같은 구조를, "route 목표속도(v_cruise) 하강률"을 j_lead의
+# route 아날로그로 삼아 적용한다(update() 내 self.route_decel_rate, L1330 부근).
+# 임계값은 176차 실측(route `6310bba9b8`, t=829.0~832.6, EMA 적용 전 raw 하강률
+# 실측 기준 구간 내내 대략 0.55~1.7 m/s^2, 정상상태 평균 ~0.9 m/s^2)을 참고한
+# 1차 추정치 -- 실측 재검증(closedloop replay) 전까지 확정 아님.
+CRUISE_DECEL_RATE_RELAX_LOW = 0.3    # m/s^2 : route 하강률이 이 이하면 완화 없음(기존 200 유지) -- 정차/서행 등 일상적 미세 흔들림에 반응하지 않기 위한 하한
+CRUISE_DECEL_RATE_RELAX_HIGH = 0.85  # m/s^2 : 이 이상이면 최대 완화(아래 CRUISE_DECEL_RELAX_A_CHANGE_COST)까지 도달.
+                                      # 177차 sim_causeB_patch_validate.py 검증: HIGH=1.0으로는 EMA(0.1/0.9)
+                                      # 평활화된 route_decel_rate가 정상상태에서 ~0.906까지만 올라 완전
+                                      # 완화(20)에 못 미침(a_change_cost 최소 44.2, 부호전환 개선 0.2s에 그침).
+                                      # 176차 실측 정상상태 평균(~0.9)보다 살짝 아래로 낮춰 EMA로도 완전
+                                      # 완화 구간에 도달하게 함(아래 재검증 결과 참고).
+CRUISE_DECEL_RELAX_A_CHANGE_COST = 20.0  # 리드 케이스 최솟값과 동일하게 맞춤(일관성) -- 임의로 더 낮추지 않음
 DANGER_ZONE_COST = 100.
 CRASH_DISTANCE = .25
 LEAD_DANGER_FACTOR = 0.8 # 0.75
@@ -664,6 +681,15 @@ class LongitudinalMpc:
 
     self.a_change_cost = A_CHANGE_COST
     self.j_lead = 0.0
+
+    # 177차(설계, 176차 원인B 가설 검증 SUCCESS 기반): 리드가 없는 cruise 모드에서
+    # route가 감속 스케줄을 내리는 동안(가속->감속 부호전환 구간) A_CHANGE_COST=200
+    # 고정이 반응을 구조적으로 지연시킨다는 176차 가설(합성+실측 폐루프 재현 모두
+    # 방향/크기 일치, 0.45~0.5s 지연)에 대응. j_lead(리드 케이스의 저크비용 완화
+    # 트리거)의 route 버전 -- v_cruise 하강률을 EMA로 완만화해 추적한다.
+    # (아래 CRUISE_DECEL_RATE_RELAX_* 적용부, L1330 부근 참고)
+    self._v_cruise_prev = None    # 직전 사이클 v_cruise(m/s) -- 하강률 계산용
+    self.route_decel_rate = 0.0   # EMA(m/s^2), route 목표속도가 얼마나 빠르게 떨어지는 중인지
 
     self.reset()
     self.source = SOURCES[2]
@@ -1324,8 +1350,24 @@ class LongitudinalMpc:
       # These are not used in ACC mode
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
+      # 177차: route 목표속도(v_cruise) 하강률을 EMA로 추적(j_lead와 동일한
+      # 0.1/0.9 저역통과) -- 아래 a_change_cost 완화 게이트가 참조.
+      route_decel_rate_raw = 0.0
+      if self._v_cruise_prev is not None and self.dt > 1e-3:
+        route_decel_rate_raw = max(0.0, (self._v_cruise_prev - v_cruise) / self.dt)
+      self._v_cruise_prev = v_cruise
+      self.route_decel_rate = route_decel_rate_raw * 0.1 + self.route_decel_rate * 0.9
+
       if radarstate.leadOne.status:
         base_a_change_cost = np.interp(abs(self.j_lead), [0.3, 2.0], [A_CHANGE_COST, 20])
+      elif self.source == 'cruise':
+        # 177차: 리드가 없고(위 if 분기 미해당) route/cruise 타겟이 실제로 지배적일
+        # 때만(self.source=='cruise') 완화 -- lead0/lead1/e2e가 지배적이면 기존
+        # 그대로(A_CHANGE_COST=200). route가 안정적이거나 상승 중(route_decel_rate
+        # ~=0)이면 CRUISE_DECEL_RATE_RELAX_LOW 이하라 완화 없이 200 그대로 유지됨.
+        base_a_change_cost = np.interp(self.route_decel_rate,
+                                        [CRUISE_DECEL_RATE_RELAX_LOW, CRUISE_DECEL_RATE_RELAX_HIGH],
+                                        [A_CHANGE_COST, CRUISE_DECEL_RELAX_A_CHANGE_COST])
       else:
         base_a_change_cost = A_CHANGE_COST
 
