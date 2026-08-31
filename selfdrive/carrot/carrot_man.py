@@ -78,6 +78,30 @@ ROUTE_CURVE_NEGLIGIBLE_THRESHOLD = 0.001
 # 필드가 이미 발행 중이었는데 extract_log.py가 뽑지 않았던 것).
 ROUTE_CURVATURE_FINE_SAMPLE = 1
 
+# [179차 후속2, 대안1 채택 -- 상대적 심각도 게이트] 179차의 "가장 가까운
+# 지점" apex 선택(아래 carrot_navi_route() 참고)은 근접 미세잡음(floor
+# 0.001 바로 위, curv~0.01~0.02)에도 반응해 60~100m 앞의 진짜 급커브를
+# 무시하는 부작용이 실측(route 00000374, t≈753.5~759.3)으로 확인됐다
+# (179차 계속, sharpest 대비 최대 9.72km/h 더 높은/덜 안전한 출력).
+# "도로제한속도 대비 절대 비율" 게이트(179차 후속 1차 시도)는 lookup
+# 테이블(V_CURVE_LOOKUP_BP/VALS)이 저곡률 구간에서 비선형(가파름)이라
+# 잡음이 실제 완만한 커브보다 오히려 더 "심각"하게 나오는 역전이 있어
+# 폐기(NEGATIVE, 12/12 유닛테스트로 확정). 대신 "같은 lookahead 윈도우
+# 내 가장 급한 지점(sharpest) 대비 후보 지점의 상대적 심각도 비율"을
+# 게이트로 쓰면 이 역전 문제를 피할 수 있음을 확인(POSITIVE, 179차
+# 후속2, 실함수 호출 기준 유닛테스트 15/15 PASS). severity(k) :=
+# nRoadLimitSpeed - speeds[k]로 정의, candidates(감속 필요 지점) 중
+# severity(k) >= ROUTE_APEX_RELATIVE_SEVERITY_RATIO * sharpest_severity
+# 인 가장 가까운 지점을 선택 -- 그런 지점이 없으면 게이트 없는 기존
+# nearest(가장 가까운 후보)로 폴백(게이트 때문에 아예 반응 안 하는
+# 것보다 안전 쪽 폴백). 기본값 0.85는 검증2(curve1, 상대severity=0.962,
+# 유지되어야 함)와 검증1(noise, 상대severity=0.795, 차단되어야 함) 사이
+# 워킹 구간(0.80~0.95)의 중간값. 사전검증: devnotes toolkit/
+# sim_route_camera_style_decel.py::carrot_navi_route_camera_style_nearest_relative_gated()
+# (179차 후속2). **오프라인 replay_route_camera_style_vs_baseline.py
+# 재검증 및 실차 검증은 아직 수행하지 않음(사용자 담당).**
+ROUTE_APEX_RELATIVE_SEVERITY_RATIO = 0.85
+
 # [162차, 방향2 - 보수적 완화] carrot_serv.py::_update_gps()가 계산하는
 # position_dt_since_fix(마지막 실제 위치 fix 이후 데드레커닝 경과시간)가
 # 이 값을 넘으면 위치추정을 신뢰할 수 없는 상태로 보고, route_speed
@@ -677,12 +701,22 @@ class CarrotMan:
             # (전부 직선) 기존과 동일하게 전역 min(speeds)로 폴백 --
             # 이 경우 모든 speeds가 사실상 도로제한속도이므로 어느 지점을
             # 골라도 out_speed에 미치는 영향은 없다.
-            apex_idx = next(
-                (k for k in range(len(speeds)) if speeds[k] < self.carrot_serv.nRoadLimitSpeed),
-                None,
-            )
-            if apex_idx is None:
+            # [179차 후속2] "가장 가까운 지점"(candidates) 선택 이후,
+            # 그 중 sharpest(윈도우 내 최댓 severity) 대비 상대적으로
+            # 심각한(=ROUTE_APEX_RELATIVE_SEVERITY_RATIO 이상) 지점만
+            # 후보로 남기는 상대적 심각도 게이트를 추가 적용.
+            road_limit_speed = self.carrot_serv.nRoadLimitSpeed
+            candidates = [k for k in range(len(speeds)) if speeds[k] < road_limit_speed]
+            if not candidates:
                 apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])  # 폴백: 감속필요구간 없음(직선)
+            else:
+                sharpest_severity = road_limit_speed - min(speeds[k] for k in candidates)
+                gated = [
+                    k for k in candidates
+                    if sharpest_severity > 0
+                    and (road_limit_speed - speeds[k]) >= ROUTE_APEX_RELATIVE_SEVERITY_RATIO * sharpest_severity
+                ]
+                apex_idx = gated[0] if gated else candidates[0]  # 게이트 미통과 시 게이트 없는 nearest로 폴백
             apex_dist = distances[apex_idx]
             apex_speed = speeds[apex_idx]
 
