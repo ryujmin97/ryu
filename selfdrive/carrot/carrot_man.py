@@ -687,17 +687,40 @@ class CarrotMan:
             # "이 accel_limit_kmh로 감속하기에 충분한 거리"를 목표로
             # 산정되므로(84차/85차), 경계 스냅이 없었다면 매 프레임 이미
             # 성립했어야 할 불변식(프레임당 변화 <= accel_limit_kmh*dt)을
-            # 최종 출력에서 강제로 복원하는 것에 가깝다. 대칭 적용(증가
-            # 방향도 동일 램프) -- 129차/131차가 보고한 "회전 종료 즉시
-            # 원복" 계단도 같은 메커니즘이라 함께 완화됨.
+            # 최종 출력에서 강제로 복원하는 것에 가깝다.
             # 사전검증: devnotes toolkit/sim_route_boundary_ramp_limiter.py
             # (132차) -- curve_R 10~25m/accel 0.70~1.2 조합에서 정상주행
             # 구간 최대 프레임당 낙차가 이론 상한(accel_limit_kmh*dt)
             # 이내로 억제됨을 확인(PASS).
+            #
+            # [172차/173차, 원인A 수정 -- 대칭 -> 비대칭 램프로 변경]
+            # 132차 도입 당시(91차 backward-DP, apex 개념 없음)엔 "회전
+            # 종료 즉시 원복" 계단(129/131차)까지 함께 완화하려고 증가
+            # (원복) 방향에도 동일 램프를 대칭 적용했었다(원 커밋 주석에
+            # 명시). 그러나 157/160차가 아키텍처를 카메라식 apex 거리공식
+            # (calculate_current_speed 재사용)으로 전면 교체하면서 "apex
+            # 통과 시 즉시 원복"을 설계 의도로 못박았고(160차 커밋
+            # 메시지), 실제로 카메라감속(sdi_speed)/회전감속(atc_desired)도
+            # 이 램프 없이 즉시 원복한다. 즉 132차의 증가측 램프는 160차
+            # 이후로는 더 이상 필요한 완화가 아니라, 오히려 160차가
+            # 의도한 즉시 원복을 무력화하는 부작용이 됐다(172차 실측:
+            # apex 통과 후 desiredSpeed 30->48이 accel_limit_kmh 그대로
+            # 5.5초에 걸쳐 서서히 상승 -- 사용자 제보 "우회전 통과 후
+            # route 속도가 서서히 상승"과 정합).
+            # 하강(lo) 방향은 129차/131차가 해결하려던 문제(경계 스냅으로
+            # 인한 단일프레임 급락)가 아키텍처가 바뀐 지금도 여전히
+            # 발생 가능하므로 그대로 유지 -- 감속 스케줄 보호 목적은
+            # 살아있다.
+            # 사전검증: devnotes toolkit/sim_route_boundary_ramp_limiter.py
+            # (173차, RampLimiterState(asymmetric_up=True) 추가) -- 정상
+            # 주행 중 하강측 낙차 억제는 그대로 유지, 상승측은 raw
+            # out_speed를 즉시 추종(지연 없음)함을 확인.
             if self._route_speed_prev is not None:
               max_step_kmh = accel_limit_kmh * ROUTE_SPEED_LOOP_DT
               lo = self._route_speed_prev - max_step_kmh
-              hi = self._route_speed_prev + max_step_kmh
+              # [173차] 증가(원복) 방향은 기본적으로 무제한 -- 160차 설계
+              # 의도(즉시 원복)를 그대로 따른다.
+              hi = math.inf
               # [162차] 위치추정이 불확실한 구간(데드레커닝이 실제 GPS/앱
               # 위치갱신 없이 오래 지속)에서는 상승(완화) 쪽 상한을 이전
               # 값으로 고정 -- curvature 오판으로 인한 "가짜 직선" 판정이
@@ -709,6 +732,10 @@ class CarrotMan:
               # 이 게이트(방향2)가 안전망으로 발동하도록 조건을 좁힘.
               # 방향1이 정상 동작 중(cc_pose_valid=True)이면 방향2는
               # 물러나 route가 정확해진 curvature를 그대로 따라가게 둔다.
+              # [173차] 이 게이트는 132차 대칭램프 시절과 동일하게 그대로
+              # 유지 -- 위치불확실 상황에서만 예외적으로 상승측도 다시
+              # prev로 고정(안전망), 정상 상황에서만 위 무제한(hi=inf)이
+              # 적용된다.
               if (self.carrot_serv.position_dt_since_fix > ROUTE_POSITION_UNCERTAIN_DT_S
                   and not self.carrot_serv.cc_pose_valid):
                 hi = self._route_speed_prev
