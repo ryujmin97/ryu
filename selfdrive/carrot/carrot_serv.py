@@ -155,6 +155,12 @@ class CarrotServ:
     self.position_dt_since_fix = 0.0
     self.bearing = 0.0
     self.gps_valid = False
+    # [169차 계측] "패킷단절 vs 내용정지" 구분용 -- navi 패킷이 마지막으로
+    # "도착"한 시점(last_update_gps_time_navi) 기준 경과시간. 이 값이 계속
+    # 3.0 미만으로 유지되는데도 vpPosPointLatNavi가 안 바뀐다면 "내용정지"
+    # (패킷은 오지만 값이 그대로), 이 값 자체가 3.0을 넘으면 "패킷단절"
+    # (FINDINGS.md 169차 NEEDS_INVESTIGATION 참고).
+    self.dt_navi_packet_age = 0.0
 
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
@@ -721,7 +727,11 @@ class CarrotServ:
 
     now = time.monotonic()
     gps_updated_phone = (now - self.last_update_gps_time_phone) < 3
-    gps_updated_navi = (now - self.last_update_gps_time_navi) < 3
+    # [169차 계측] gps_updated_navi가 참조하는 것과 동일한 경과시간을
+    # 별도 보관 -- cereal로 발행해 실차 로그에서 "패킷단절"(이 값이 3.0
+    # 초과) 여부를 직접 관측하기 위함(FINDINGS.md 169차).
+    self.dt_navi_packet_age = now - self.last_update_gps_time_navi
+    gps_updated_navi = self.dt_navi_packet_age < 3
 
     bearing = self.nPosAngle
     if gps_updated_navi:
@@ -1206,6 +1216,12 @@ class CarrotServ:
     msg.carrotMan.naviPaths = coords_str
 
     msg.carrotMan.leftSec = int(self.carrot_left_sec)
+    # [169차 계측] "패킷단절 vs 내용정지" 구분용(FINDINGS.md 169차 참고).
+    msg.carrotMan.vpPosPointLatNavi = float(self.vpPosPointLatNavi)
+    msg.carrotMan.vpPosPointLonNavi = float(self.vpPosPointLonNavi)
+    msg.carrotMan.dtNaviPacketAge = float(self.dt_navi_packet_age)
+    msg.carrotMan.positionDtSinceFix = float(self.position_dt_since_fix)
+    msg.carrotMan.ccPoseValid = bool(self.cc_pose_valid)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')

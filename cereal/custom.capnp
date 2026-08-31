@@ -41,6 +41,15 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	szSdiDescr @26 : Text;
 	naviPaths @27 : Text;
 	leftSec @28 : Int32;
+	# [169차 계측] "패킷단절 vs 내용정지" 구분용 (FINDINGS.md 169차
+	# NEEDS_INVESTIGATION). 기존 vpPosPointLatNavi/LonNavi와
+	# last_update_gps_time_navi/last_calculate_gps_time은 cereal
+	# 미발행이라 실차 로그에서 이 구분이 불가능했음.
+	vpPosPointLatNavi @29 : Float32;   # navi 원본 위도(estimate_position 입력값, 폴백 전)
+	vpPosPointLonNavi @30 : Float32;   # navi 원본 경도
+	dtNaviPacketAge @31 : Float32;     # now - last_update_gps_time_navi (초). 3.0 초과 시 "패킷단절"
+	positionDtSinceFix @32 : Float32;  # 162/163/167차 게이트가 실제로 읽는 값(now - last_calculate_gps_time)
+	ccPoseValid @33 : Bool;            # 166/167차 CC.orientationNED 기반 방향1 유효 여부(len(ned)>2)
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {
