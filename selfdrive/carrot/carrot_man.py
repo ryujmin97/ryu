@@ -437,6 +437,13 @@ class CarrotMan:
     self.navi_points_start_index = 0
     self.navi_points_active = False
     self.navd_active = False
+    # [182차 계측] navi_points_active 드롭아웃(FINDINGS.md 182차) 원인규명용.
+    # 어느 경로(navd cereal/TCP 7709 raw/TCP 7712 handle_route)가 마지막으로
+    # route를 성공 수신했는지, 비활성 상태가 얼마나 지속됐는지를 cereal로
+    # 노출한다 -- 이전엔 print()로만 남아 rlog 재분석이 불가능했음.
+    self._navi_route_source = ""
+    self._navi_active_last_ts = None
+    self._dt_route_inactive = 0.0
     # [132차] Hypothesis C(131차) 대응: carrot_navi_route()의 route_lookahead
     # 윈도우 경계로 급커브가 이산적으로 진입하며 out_speed가 단일 20Hz
     # 프레임에 급락(최대 Δ-25kph 실측)하는 현상을 완화하기 위한 프레임간
@@ -508,9 +515,20 @@ class CarrotMan:
         vturn_speed = self.carrot_curve_speed(self.sm)
         coords, distances, route_speed = self.carrot_navi_route()
 
+        # [182차 계측] navi_points_active 비활성 지속시간 갱신 (FINDINGS.md
+        # 182차 -- 이전엔 이 상태전이가 cereal 미발행이라 사후 로그분석 불가).
+        now_ts = time.monotonic()
+        if self.navi_points_active:
+          self._navi_active_last_ts = now_ts
+          self._dt_route_inactive = 0.0
+        elif self._navi_active_last_ts is not None:
+          self._dt_route_inactive = now_ts - self._navi_active_last_ts
+        # else: 이번 온로드 세션에서 한 번도 활성화된 적 없음 -- 0.0 유지
+
         #print("coords=", coords)
         #print("curvatures=", curvatures)
-        self.carrot_serv.update_navi(remote_ip, self.sm, self.pm, vturn_speed, coords, distances, route_speed, self.gps_location_service)
+        self.carrot_serv.update_navi(remote_ip, self.sm, self.pm, vturn_speed, coords, distances, route_speed, self.gps_location_service,
+                                      self.navi_points_active, self.navd_active, self._dt_route_inactive, self._navi_route_source)
 
         if frame % 20 == 0 or remote_addr is not None:
           try:
@@ -1177,6 +1195,7 @@ class CarrotMan:
         self.navi_points_active = True
         print("Received points from navd:", len(self.navi_points))
         self.navd_active = True
+        self._navi_route_source = "navd"  # [182차 계측]
 
         # 경로수신 -> carrotman active되고 약간의 시간지연이 발생함..
         if not from_navd:
@@ -1233,6 +1252,7 @@ class CarrotMan:
               coords = [c.as_dict() for c in points]
               self.navi_points_start_index = 0
               self.navi_points_active = True
+              self._navi_route_source = "tcp_raw"  # [182차 계측] TCP 7709 경로
               print("Received points:", len(self.navi_points))
               #print("Received points:", self.navi_points)
 
@@ -1440,6 +1460,7 @@ class CarrotMan:
     self.navi_points_start_index = 0
     self.navi_points_active = True
     self.navd_active = True
+    self._navi_route_source = "tcp_navi"  # [182차 계측] TCP 7712 handle_route 경로
 
     print("Received points:", len(self.navi_points))
 

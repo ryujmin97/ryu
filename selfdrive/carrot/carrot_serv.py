@@ -952,7 +952,8 @@ class CarrotServ:
         self.xSpdDist = distance
         self.xSpdType =xSpdType
 
-  def update_navi(self, remote_ip, sm, pm, vturn_speed, coords, distances, route_speed, gps_service):
+  def update_navi(self, remote_ip, sm, pm, vturn_speed, coords, distances, route_speed, gps_service,
+                   navi_points_active=False, navd_active=False, dt_route_inactive=0.0, navi_route_source=""):
 
     self.debugText = ""
     self.update_params()
@@ -1222,6 +1223,11 @@ class CarrotServ:
     msg.carrotMan.dtNaviPacketAge = float(self.dt_navi_packet_age)
     msg.carrotMan.positionDtSinceFix = float(self.position_dt_since_fix)
     msg.carrotMan.ccPoseValid = bool(self.cc_pose_valid)
+    # [182차 계측] navi_points_active 드롭아웃 원인규명용 (FINDINGS.md 182차)
+    msg.carrotMan.naviPointsActive = bool(navi_points_active)
+    msg.carrotMan.navdActive = bool(navd_active)
+    msg.carrotMan.dtRouteInactive = float(dt_route_inactive)
+    msg.carrotMan.routeSource = str(navi_route_source)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')

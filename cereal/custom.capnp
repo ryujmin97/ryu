@@ -50,6 +50,19 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	dtNaviPacketAge @31 : Float32;     # now - last_update_gps_time_navi (초). 3.0 초과 시 "패킷단절"
 	positionDtSinceFix @32 : Float32;  # 162/163/167차 게이트가 실제로 읽는 값(now - last_calculate_gps_time)
 	ccPoseValid @33 : Bool;            # 166/167차 CC.orientationNED 기반 방향1 유효 여부(len(ned)>2)
+
+	# [182차 계측] carrotMan.navi_points_active(route 폴리라인 활성 플래그)가
+	# 이전까지 cereal 미발행이라 "route 사전감속이 61초간 없었다"는 현상을
+	# 실차 로그(rlog)만으로 재현/원인규명할 수 없었음(FINDINGS.md 182차 —
+	# navi_points_active=False 61초 지속으로 carrot_navi_route()가 곡률계산
+	# 자체를 스킵, route=390.0 "제약없음" 기본값 노출). 162/163차 게이트
+	# (positionDtSinceFix)와는 무관한 별개 실패모드 -- navi_points_active는
+	# navi_points_active=True인 상태에서의 위치추정 오차가 아니라, 그 전
+	# 단계인 "route 폴리라인 수신 자체"가 끊기는 문제.
+	naviPointsActive @34 : Bool;  # carrot_man.navi_points_active 그대로 발행
+	navdActive @35 : Bool;        # carrot_man.navd_active 그대로 발행 (navd cereal 경로 활성 여부)
+	dtRouteInactive @36 : Float32; # navi_points_active=False 상태 지속시간(초). True면 0.0
+	routeSource @37 : Text;        # 마지막으로 route를 성공 수신한 경로: "navd"/"tcp_raw"(7709)/"tcp_navi"(7712 handle_route)/""(아직 없음)
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {
