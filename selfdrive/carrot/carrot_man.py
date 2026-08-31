@@ -662,7 +662,27 @@ class CarrotMan:
             # 1차가 더 급해 apex가 전환되는 경우 둘 다) 7/7 PASS, 132차
             # 램프리미터 이론상한(accel_limit_kmh*dt) 내에서 톱니 진동
             # 없이 apex 전환됨을 확인.
-            apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])  # 가장 급한 지점
+            #
+            # [179차, apex 선택기준 변경 -- "가장 급한 지점" -> "가장 가까운
+            # 지점"] 157/160차부터 유지되던 min(speeds) 전역탐색(=lookahead
+            # 윈도우 전체에서 목표속도가 가장 낮은, 즉 가장 급커브인 지점을
+            # apex로 선택)은 그 지점이 아무리 멀리 있어도(예: lookahead
+            # 끝자락의 급커브) 그 먼 지점 기준으로 조기 감속을 시작하게
+            # 만들어, 실제로는 먼저 지나야 할 더 가까운(하지만 상대적으로
+            # 완만한) 커브를 무시하는 문제가 있었다. distances[]는 항상
+            # 오름차순(가장 가까운 포인트가 index 0)이므로, speeds[k] <
+            # 도로제한속도(nRoadLimitSpeed)인 -- 즉 실제 감속이 필요한 --
+            # 가장 가까운(작은 distance) 지점을 apex로 선택하도록 변경.
+            # 감속이 필요한 지점이 lookahead 윈도우 내에 하나도 없으면
+            # (전부 직선) 기존과 동일하게 전역 min(speeds)로 폴백 --
+            # 이 경우 모든 speeds가 사실상 도로제한속도이므로 어느 지점을
+            # 골라도 out_speed에 미치는 영향은 없다.
+            apex_idx = next(
+                (k for k in range(len(speeds)) if speeds[k] < self.carrot_serv.nRoadLimitSpeed),
+                None,
+            )
+            if apex_idx is None:
+                apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])  # 폴백: 감속필요구간 없음(직선)
             apex_dist = distances[apex_idx]
             apex_speed = speeds[apex_idx]
 
