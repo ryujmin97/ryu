@@ -143,6 +143,10 @@ class CarrotServ:
     self.last_update_gps_time_navi = 0
     self.bearing_offset = 0.0
     self.bearing_measured = 0.0
+    # [162차] 마지막 실제 위치 fix(navi/phone/internal GPS) 이후 estimate_position()이
+    # 데드레커닝만으로 외삽해온 경과시간(초). carrot_man.py::carrot_navi_route()가
+    # route_speed 램프리미터의 위치불확실성 게이트 판정에 사용(FINDINGS.md 162차).
+    self.position_dt_since_fix = 0.0
     self.bearing = 0.0
     self.gps_valid = False
 
@@ -751,6 +755,9 @@ class CarrotServ:
     bearing_calculated = (bearing + self.bearing_offset) % 360
 
     dt = now - self.last_calculate_gps_time
+    # [162차] carrot_navi_route()의 route_speed 램프리미터 위치불확실성
+    # 게이트가 읽는 값 -- 실제 fix 이후 데드레커닝만으로 흘러온 시간.
+    self.position_dt_since_fix = dt
     #print(f"dt = {dt:.1f}, {self.vpPosPointLatNavi}, {self.vpPosPointLonNavi}")
     if dt > 5.0:
       self.vpPosPointLat, self.vpPosPointLon = 0.0, 0.0

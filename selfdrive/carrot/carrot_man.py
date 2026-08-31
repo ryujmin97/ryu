@@ -78,6 +78,26 @@ ROUTE_CURVE_NEGLIGIBLE_THRESHOLD = 0.001
 # 필드가 이미 발행 중이었는데 extract_log.py가 뽑지 않았던 것).
 ROUTE_CURVATURE_FINE_SAMPLE = 1
 
+# [162차, 방향2 - 보수적 완화] carrot_serv.py::_update_gps()가 계산하는
+# position_dt_since_fix(마지막 실제 위치 fix 이후 데드레커닝 경과시간)가
+# 이 값을 넘으면 위치추정을 신뢰할 수 없는 상태로 보고, route_speed
+# 램프리미터가 "완화(속도 상향)" 방향으로는 움직이지 못하게 동결한다.
+# 배경(FINDINGS.md 162차): route aeeed9e4a5 seg3 실측에서 앱/폰 GPS
+# 갱신이 11초간 끊기며 estimate_position() 데드레커닝이 옛 헤딩(296.0°
+# 고정)으로 계속 직진 외삽 -> 실제 급우회전(steer 최대 -121.9°) 중인데
+# curvature 계산이 "직선"으로 오판(위치오차 최대 28m 누적)해 route_speed가
+# 300 쪽으로 완화되며 상승. 이 게이트는 근본원인(헤딩 오차) 자체를 고치는
+# 것(방향1, livePose 자세데이터 보정)이 아니라, 그 오판이 "제약 해제"
+# 방향으로 새는 것만 막는 보수적 완화다 -- 하강(더 낮은 속도로 감속)
+# 방향은 그대로 허용하므로 실제 커브를 늦게라도 정상 감지하면 여전히
+# 반응한다. 이 구간에서도 vturn(비전)이 이미 안전하게 인계받고 있음이
+# 실측으로 확인됨(FINDINGS.md 162차) -- 안전 회귀 위험 없이 route의
+# 잘못된 "완화" 오탐만 억제하는 목적.
+# 3.0s는 carrot_serv.py의 gps_updated_navi/gps_updated_phone 신선도
+# 판정과 동일한 관례값(_update_gps() L713-714)을 그대로 재사용.
+# 사전검증: devnotes toolkit/sim_route_position_uncertainty_gate.py(162차).
+ROUTE_POSITION_UNCERTAIN_DT_S = 3.0
+
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
 def haversine(lon1, lat1, lon2, lat2):
@@ -670,6 +690,13 @@ class CarrotMan:
               max_step_kmh = accel_limit_kmh * ROUTE_SPEED_LOOP_DT
               lo = self._route_speed_prev - max_step_kmh
               hi = self._route_speed_prev + max_step_kmh
+              # [162차] 위치추정이 불확실한 구간(데드레커닝이 실제 GPS/앱
+              # 위치갱신 없이 오래 지속)에서는 상승(완화) 쪽 상한을 이전
+              # 값으로 고정 -- curvature 오판으로 인한 "가짜 직선" 판정이
+              # route_speed를 300 쪽으로 밀어올리지 못하게 막는다. 하강
+              # 쪽(lo)은 그대로 둬 실제 감속 필요는 계속 반영한다.
+              if self.carrot_serv.position_dt_since_fix > ROUTE_POSITION_UNCERTAIN_DT_S:
+                hi = self._route_speed_prev
               out_speed = min(max(out_speed, lo), hi)
             self._route_speed_prev = out_speed
     else:
