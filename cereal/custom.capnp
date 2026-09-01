@@ -63,6 +63,14 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	navdActive @35 : Bool;        # carrot_man.navd_active 그대로 발행 (navd cereal 경로 활성 여부)
 	dtRouteInactive @36 : Float32; # navi_points_active=False 상태 지속시간(초). True면 0.0
 	routeSource @37 : Text;        # 마지막으로 route를 성공 수신한 경로: "navd"/"tcp_raw"(7709)/"tcp_navi"(7712 handle_route)/""(아직 없음)
+
+	# [194차] 193차에서 carrot_man.py 내부(_route_apex_idx 등)에만 저장되고
+	# cereal에는 발행되지 않던 route apex 진단 telemetry를 실제로 rlog에
+	# 싣기 위해 추가. 기존 필드(@0~@37)는 건드리지 않고 뒤에 append.
+	routeApexIdx @38 : Int32;      # carrot_navi_route()가 선택한 apex(최대곡률지점) 인덱스. 미계산/스킵 시 -1
+	routeApexDist @39 : Float32;   # 현재위치 ~ apex까지 거리(m)
+	routeApexSpeed @40 : Float32;  # apex 지점 목표속도(km/h)
+	routeOutSpeed @41 : Float32;   # calculate_current_speed()가 계산한 route 최종 출력 속도(km/h, min(...,300.0) 적용 전 값)
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {

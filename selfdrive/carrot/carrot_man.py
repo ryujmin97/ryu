@@ -582,6 +582,13 @@ class CarrotMan:
     self._route_apex_dist = 0.0
     self._route_apex_speed = 0.0
     self._route_out_speed = 300.0
+    # [194차] cereal로 실제 발행되는 CarrotServ 쪽 저장소도 동일하게
+    # 매 호출 초기화 -- 이걸 빼먹으면 route가 비활성화된 프레임에서도
+    # rlog에 직전 활성 프레임의 apex 값이 그대로 남아 오분석을 유발한다.
+    self.carrot_serv.route_apex_idx = -1
+    self.carrot_serv.route_apex_dist = 0.0
+    self.carrot_serv.route_apex_speed = 0.0
+    self.carrot_serv.route_out_speed = 300.0
 
     # [99차/100차, 죽은 코드 정리] 여기 있던 `if self.carrot_serv.active_carrot > 1:
     # if False and self.navd_active:` 블록은 항상 거짓이라 실행된 적이 없는
@@ -757,6 +764,16 @@ class CarrotMan:
             self._route_apex_dist = apex_dist
             self._route_apex_speed = apex_speed
             self._route_out_speed = out_speed
+            # [194차] 193차는 이 값을 CarrotMan(self) 내부에만 저장해서
+            # cereal(msg.carrotMan)까지 전달되지 않았음(FINDINGS.md 193차).
+            # CarrotServ가 실제 cereal 발행부를 갖고 있고 self.carrot_serv는
+            # CarrotServ 인스턴스이므로, 계산 직후 CarrotServ 쪽 저장소에도
+            # 같은 값을 써서 carrot_serv.py의 update_navi()가 msg에 담을 수
+            # 있게 한다. 주행 계산 로직(out_speed 등)은 변경하지 않는다.
+            self.carrot_serv.route_apex_idx = apex_idx
+            self.carrot_serv.route_apex_dist = apex_dist
+            self.carrot_serv.route_apex_speed = apex_speed
+            self.carrot_serv.route_out_speed = out_speed
             out_speed = min(out_speed, 300.0)
             # accel_limit_kmh는 더 이상 동적으로 변하지 않으므로(부스트 폐기)
             # 고정값 -- 아래 132차 램프리미터가 그대로 사용.

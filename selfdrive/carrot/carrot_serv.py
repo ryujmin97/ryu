@@ -162,6 +162,16 @@ class CarrotServ:
     # (FINDINGS.md 169차 NEEDS_INVESTIGATION 참고).
     self.dt_navi_packet_age = 0.0
 
+    # [194차] carrot_man.py::carrot_navi_route()가 계산한 route apex 진단
+    # telemetry를 cereal(msg.carrotMan)로 실제 발행하기 위한 저장 공간.
+    # carrot_man.py는 CarrotMan(self._route_apex_idx 등)과 CarrotServ가
+    # 별개 객체이므로, carrot_man.py가 계산 직후 이 속성에도 값을 써준다
+    # (FINDINGS.md 193차/194차 참고). 미계산/스킵 시 기본값 유지.
+    self.route_apex_idx = -1
+    self.route_apex_dist = 0.0
+    self.route_apex_speed = 0.0
+    self.route_out_speed = 300.0
+
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
     self.phone_latitude = 0.0
@@ -1228,6 +1238,13 @@ class CarrotServ:
     msg.carrotMan.navdActive = bool(navd_active)
     msg.carrotMan.dtRouteInactive = float(dt_route_inactive)
     msg.carrotMan.routeSource = str(navi_route_source)
+    # [194차] route apex 진단 telemetry 실제 발행 (custom.capnp @38~@41).
+    # carrot_man.py::carrot_navi_route()가 매 사이클 self.route_apex_* 에
+    # 값을 써주므로 여기서는 그대로 msg에 담기만 한다.
+    msg.carrotMan.routeApexIdx = int(self.route_apex_idx)
+    msg.carrotMan.routeApexDist = float(self.route_apex_dist)
+    msg.carrotMan.routeApexSpeed = float(self.route_apex_speed)
+    msg.carrotMan.routeOutSpeed = float(self.route_out_speed)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')
