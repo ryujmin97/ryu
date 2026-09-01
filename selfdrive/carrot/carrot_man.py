@@ -576,6 +576,13 @@ class CarrotMan:
   
   def carrot_navi_route(self):
 
+    # [193차] route apex 진단값은 매 호출마다 초기화한다.
+    # route 비활성/후보 없음 프레임에서 이전 프레임 값이 남지 않도록 한다.
+    self._route_apex_idx = -1
+    self._route_apex_dist = 0.0
+    self._route_apex_speed = 0.0
+    self._route_out_speed = 300.0
+
     # [99차/100차, 죽은 코드 정리] 여기 있던 `if self.carrot_serv.active_carrot > 1:
     # if False and self.navd_active:` 블록은 항상 거짓이라 실행된 적이 없는
     # 죽은 분기 -- 제거 (동작 변화 없음).
@@ -744,6 +751,12 @@ class CarrotMan:
                 self.carrot_serv.autoNaviSpeedCtrlEnd,    # safe_time -- 카메라와 동일 파라미터 재사용
                 self.carrot_serv.autoNaviSpeedDecelRate,  # safe_decel_rate -- 카메라와 동일 파라미터 재사용
             )
+            # [193차] route apex 실차/replay 진단 telemetry.
+            # 주행 계산값은 변경하지 않고, 선택된 apex와 최종 route 출력만 보존한다.
+            self._route_apex_idx = apex_idx
+            self._route_apex_dist = apex_dist
+            self._route_apex_speed = apex_speed
+            self._route_out_speed = out_speed
             out_speed = min(out_speed, 300.0)
             # accel_limit_kmh는 더 이상 동적으로 변하지 않으므로(부스트 폐기)
             # 고정값 -- 아래 132차 램프리미터가 그대로 사용.
@@ -869,6 +882,10 @@ class CarrotMan:
     msg['v_ego_kph'] = v_ego_kph
     msg['tbt_dist'] = self.carrot_serv.xDistToTurn
     msg['sdi_dist'] = self.carrot_serv.xSpdDist
+    msg['route_apex_idx'] = getattr(self, '_route_apex_idx', -1)
+    msg['route_apex_dist'] = getattr(self, '_route_apex_dist', 0.0)
+    msg['route_apex_speed'] = getattr(self, '_route_apex_speed', 0.0)
+    msg['route_out_speed'] = getattr(self, '_route_out_speed', 0.0)
     msg['active'] = self.controls_active
     msg['xState'] = self.xState
     msg['trafficState'] = self.trafficState
