@@ -177,8 +177,13 @@ ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH = 15.0
 ROUTE_VEGO_BOOST_MAX_MSS = 3.0
 # [202차, 사용자+ChatGPT("지선생") 합의] route apex out_speed 상한을 기존
 # sentinel 값(300.0)에서 실주행 상한 150.0km/h로 명시적으로 분리.
-# 이 상수는 apex 계산 직후(carrot_navi_route, out_speed = min(out_speed,
-# ROUTE_MAX_SPEED_KPH))의 "계산된 값" 클리핑에만 쓰인다 -- route가 아예
+# [205차] 위 150 고정 클리핑은 vEgo(현재속도) 기반 동적 상한으로 교체됨
+# (아래 carrot_navi_route() 내 "out_speed = min(out_speed, max(v_ego_kph,
+# apex_speed))" 참고, 이유는 그 지점 주석). 이 상수 자체는 폐기하지 않고
+# 그 동적 상한 위에 얹는 절대 안전상한(secondary ceiling)으로 유지 --
+# 정상 주행에서는 vEgo가 이 값을 넘지 않으므로(실차 계측 최대 117~122km/h,
+# WIP.md real-drive calibration 참고) 사실상 발동하지 않지만, vEgo 센서
+# 이상값 등 예상 밖 입력에 대한 방어선으로 남겨둔다. route가 아예
 # 비활성/미계산 상태임을 나타내는 "제약 없음" sentinel(_route_out_speed
 # 초기값 300.0, carrot_serv.route_out_speed 초기값 300.0)은 의미가 다르므로
 # 그대로 300.0 유지(150으로 낮추면 route 비활성 구간에서도 마치 150km/h
@@ -897,7 +902,35 @@ class CarrotMan:
             self.carrot_serv.route_candidate2_idx = self._route_candidate2[0]
             self.carrot_serv.route_candidate2_dist = self._route_candidate2[1]
             self.carrot_serv.route_candidate2_speed = self._route_candidate2[2]
-            out_speed = min(out_speed, ROUTE_MAX_SPEED_KPH)  # [202차] 300.0 -> 150.0(명시적 상수)
+            # [205차, 사용자 지시 -- "감속로직은 최대값 150이 아니라 현재속도(예
+            # 70)에서 목표속도로 내려오는 로직으로"] 202차의 고정 150 상한을
+            # vEgo(현재속도) 기반 동적 상한으로 교체.
+            #
+            # 배경 확인(코드 레벨): calculate_current_speed(left_dist,
+            # safe_speed_kph, safe_time, safe_decel_rate)는 v_ego를 인자로
+            # 받지 않는다 -- 과속카메라(sdi_speed)/route 둘 다 "남은 거리"만으로
+            # 물리공식(v_i^2=v_f^2+2ad)을 풀어 raw 값을 매 프레임 재계산하는
+            # 구조이며, 카메라는 이 raw 값을 250 cap 외 추가 제한 없이 그대로
+            # arbitration에 넣는다(selfdrive/carrot/carrot_serv.py:1050 부근).
+            # 즉 "현재속도에서 시작"하는 로직은 원래 카메라에도 없었다 -- raw가
+            # 멀리서는 크고(최대 250) 가까워지며 sqrt 곡선으로 목표속도에
+            # 수렴하는 것 자체가 "감속처럼 보이는" 효과의 정체.
+            #
+            # 202차가 150을 고정 상한으로 둔 이유는 apex_idx가 먼 후보로
+            # 순간전환될 때(203차가 규명한 "스파이크/고원" 문제, WIP.md 203차
+            # 참고) raw가 최대 298까지 튀는 것을 막기 위함이었는데, 고정값이라
+            # vEgo가 이미 낮은 저속 주행 중에도 150까지는 그대로 허용되는
+            # 근본적 한계가 있었다. 상한을 "max(vEgo_kph, apex_speed)"로
+            # 바꾸면: (1) route는 현재 주행 속도보다 더 빠르게 가라고 절대
+            # 권하지 않는다(사전감속 신호라는 route의 목적과 부합, "가속
+            # 신호"가 될 이유가 없음), (2) apex_speed(물리적으로 요구되는
+            # 최종 목표속도) 밑으로는 절대 깎이지 않는다(calculate_current_speed
+            # 자신의 반환 하한과 동일한 하한을 유지 -- max()로 보장),
+            # (3) apex_idx 오선택으로 raw가 298까지 튀어도, vEgo가 예를 들어
+            # 55km/h면 상한이 max(55, apex_speed)로 즉시 눌려 202차가 막으려던
+            # 스파이크의 근본 원인을 고정값(150)보다 더 직접적으로 차단한다.
+            v_ego_kph = self.sm['carState'].vEgo * 3.6
+            out_speed = min(out_speed, max(v_ego_kph, apex_speed), ROUTE_MAX_SPEED_KPH)  # [205차] 동적 상한(vEgo/apex_speed) + 202차 절대 안전상한(150) 동시 적용
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
             # 그대로 사용.
             base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
