@@ -175,6 +175,21 @@ ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH = 15.0
 # 맞춤 -- 일반적인 편안한 감속(0.7~1.2대)보다는 높지만 비상제동 수준은
 # 아닌 보수적 상한.
 ROUTE_VEGO_BOOST_MAX_MSS = 3.0
+# [202차, 사용자+ChatGPT("지선생") 합의] route apex out_speed 상한을 기존
+# sentinel 값(300.0)에서 실주행 상한 150.0km/h로 명시적으로 분리.
+# 이 상수는 apex 계산 직후(carrot_navi_route, out_speed = min(out_speed,
+# ROUTE_MAX_SPEED_KPH))의 "계산된 값" 클리핑에만 쓰인다 -- route가 아예
+# 비활성/미계산 상태임을 나타내는 "제약 없음" sentinel(_route_out_speed
+# 초기값 300.0, carrot_serv.route_out_speed 초기값 300.0)은 의미가 다르므로
+# 그대로 300.0 유지(150으로 낮추면 route 비활성 구간에서도 마치 150km/h
+# 제약이 걸린 것처럼 arbitration에 잘못 참여할 위험). 적용 순서는 이
+# 클리핑 이후 carrot_serv.update_navi()에서 MapTurnSpeedFactor(기본
+# 1.30)가 곱해지므로(carrot_serv.py `route_speed = max(route_speed *
+# self.mapTurnSpeedFactor, ...)`), 최종 arbitration 입력값 상한은
+# 150 * mapTurnSpeedFactor(예: 1.30 기준 195km/h)가 될 수 있음 -- 실사용상
+# 문제 없다고 판단(어차피 vturn/road_limit 등 다른 후보가 그보다 낮게
+# 형성되는 것이 일반적).
+ROUTE_MAX_SPEED_KPH = 150.0
 
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
@@ -829,7 +844,7 @@ class CarrotMan:
             self.carrot_serv.route_apex_dist = apex_dist
             self.carrot_serv.route_apex_speed = apex_speed
             self.carrot_serv.route_out_speed = out_speed
-            out_speed = min(out_speed, 300.0)
+            out_speed = min(out_speed, ROUTE_MAX_SPEED_KPH)  # [202차] 300.0 -> 150.0(명시적 상수)
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
             # 그대로 사용.
             base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
