@@ -738,7 +738,14 @@ class CarrotMan:
 
         curvatures = []
         distances = []
-        distance = 10.0
+        # [213차, 212차 A안 채택] distance=10.0 선증가(pre-increment) 구조
+        # 때문에 i=0(=거의 차량 현재 위치)이 무조건 20.0m로 찍히던 하드플로어
+        # 제거. 루프 본문이 append 직전에 매번 distance_interval(10.0)을
+        # 먼저 더하므로, distances[i]가 정확히 i*10.0이 되게 하려면 초기값을
+        # -10.0으로 둬야 한다(i=0: -10+10=0.0, i=1: 0+10=10.0, ...).
+        # resampled_points[0]==start_point(get_path_after_distance()가 계산한
+        # 현재 위치와 가장 가까운 경로점)이므로 i=0 -> 0.0m가 맞다.
+        distance = -10.0
         sample = 4
         if len(resampled_points) >= sample * 2 + 1:
             # Calculate curvatures and speeds based on curvature
@@ -763,7 +770,8 @@ class CarrotMan:
             # 형상(직선 오탐 방지)은 그대로 유지된다.
             sample_fine = ROUTE_CURVATURE_FINE_SAMPLE
             if sample_fine and sample_fine < sample and len(resampled_points) >= sample_fine * 2 + 1:
-                fine_distance = 10.0
+                # [213차, 위 macro distance와 동일 이유] 20m 하드플로어 제거.
+                fine_distance = -10.0
                 fine_points = []  # (distance, curvature, speed)
                 for i in range(len(resampled_points) - sample_fine * 2):
                     fine_distance += distance_interval
