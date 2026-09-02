@@ -117,6 +117,65 @@ ROUTE_CURVATURE_FINE_SAMPLE = 1
 # 예: 캘리브레이션 미완료)일 때만 이 게이트가 발동하도록 조건을 좁혔다.
 ROUTE_POSITION_UNCERTAIN_DT_S = 3.0
 
+# [199차, 설계 A v2->v3] vEgo 기반 동적 감속(설계 A) 재검토 배경.
+#
+# 198차에서 확인된 사실(devnotes FINDINGS.md/WIP.md 198차 참고, 이하 요약):
+# calculate_current_speed()의 raw out_speed는 항상 197차 그대로 유지하고,
+# 132/173차 프레임간 램프리미터의 "하강 상한(accel_limit_kmh)"만 그 순간
+# 실제로 필요한 감속도(required_decel, vEgo 기반)로 동적 부스트하면(v2),
+# "이미 램프가 걸린 채 더 급한 2차 apex로 갱신"되는 뒤늦은 발견 상황에서
+# 오버슈트를 줄일 수 있다(149/150차가 시도해 NEGATIVE였던 "out_speed
+# 자체를 올린다" 방향과는 반대로, out_speed는 그대로 두고 램프만 따라잡게
+# 하는 조합이라 목표를 완화하는 부작용이 구조적으로 불가능함).
+#
+# 그러나 198차 v2는 "연속되는 굽이길(winding road)에서 apex_dist가 거의
+# 항상 정확히 distance_interval(=10m, lookahead 상대배열의 첫 샘플)로
+# 구조적으로 고정된다"는 FAIL2를 남겼다 -- candidates[0](위 179/196차,
+# "road_limit 미만인 가장 가까운 지점") 선택 방식 자체가 원인이라, 이
+# apex_dist 값만으로는 "뒤늦게 발견된 진짜 급커브"와 "정상 주행 중 매
+# 프레임 갱신되는 다음 곡률 샘플"을 구분할 수 없다(devnotes toolkit/
+# sim_route_vego_required_decel_v2.py 실측: winding road 600m 전체에서
+# apex_dist 값의 집합이 {10.0} 하나뿐이었음).
+#
+# [199차, 부분 해결] apex_dist 대신 **apex_speed의 프레임간 낙차**를
+# 구분 기준으로 쓴다. 연속 굽이길은 곡률이 서서히 바뀌므로 apex_speed도
+# 프레임당(20Hz) 완만하게만(devnotes 실측 최대 ~2.6km/h, 0.5m 간격
+# fine sweep 기준으로도 ~1.4km/h) 변한다. 반면 "뒤늦게 발견된 급커브"는
+# 정의상 apex_speed가 한 프레임 만에 큰 폭(수십 km/h)으로 떨어진다.
+# 이 낙차가 아래 임계값을 넘는 프레임에서만 "무장(armed)"하여 부스트를
+# 켜고, 그 이후에도 apex_speed가 무장 당시 값 근방을 유지하는 동안만
+# 부스트를 유지한다(같은 급커브를 계속 추적 중이라는 뜻). 일반 굽이길
+# 처럼 apex_speed가 계속 완만하게만 바뀌면 이 게이트가 한 번도 무장되지
+# 않아 기존(197차) 동작과 완전히 동일(diff-0)하다.
+#
+# 안전마진: 실측 최대 완만변화(~2.6km/h)의 약 6배.
+# 사전검증: devnotes toolkit/sim_route_vego_required_decel_v3.py(199차)
+# -- 156차 winding road 전체 궤적 diff-0(불연속 게이트 한 번도 무장 안
+# 됨) + 급커브 인위 주입 시 해당 프레임에서 즉시 무장 감지 + 기존 v2의
+# "이미 램프 걸린 상태에서 더 급한 2차 apex" 오버슈트 감소 효과 유지,
+# 총 9/9 PASS.
+#
+# [부분 해결인 이유, 반드시 기록] apex_speed가 "한 프레임에 크게"
+# 떨어지는 불연속만 잡는다. 만약 실제 도로에서 급커브가 여러 프레임에
+# 걸쳐 이 임계값 미만씩 점진적으로(계단식이 아니라 매 프레임 조금씩)
+# 나타나는 경우 -- 누적으로는 크지만 프레임당 낙차는 항상 임계값
+# 미만인 경우 -- 이 게이트는 뚫리지 않고 여전히 197차와 동일하게(부스트
+# 없이) 동작한다. apex 절대위치를 프레임 간 추적하는 완전한 재설계
+# (158/159차가 시도했다 실측 악화로 폐기된 전례가 있는 방향, FINDINGS.md
+# 159차/195차/198차 참고) 없이는 원천적으로 닫을 수 없는 구멍이며,
+# 이번 v3는 "한 프레임 급락형" 불연속만 부분적으로 해결한다.
+#
+# **실차 검증: 미실시** -- 시뮬레이션/유닛테스트만 완료된 상태.
+ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH = 15.0
+# [199차] vEgo 기반 required_decel 부스트가 올라갈 수 있는 상한. 149/150차
+# (NEGATIVE) 당시 근사값으로 vturn_decel_rate(1.2)를 재사용했던 것과 달리,
+# 이번엔 out_speed 자체를 건드리지 않는 구조(v2/v3 공통 불변식)이므로 더
+# 넉넉한 상한을 둬도 149/150차식 "목표 완화" 부작용이 재현되지 않는다.
+# devnotes toolkit 시뮬레이션(198/199차)에서 쓰인 값(MAXD=3.0)과 동일하게
+# 맞춤 -- 일반적인 편안한 감속(0.7~1.2대)보다는 높지만 비상제동 수준은
+# 아닌 보수적 상한.
+ROUTE_VEGO_BOOST_MAX_MSS = 3.0
+
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
 def haversine(lon1, lat1, lon2, lat2):
@@ -436,6 +495,14 @@ class CarrotMan:
     # 프레임에 급락(최대 Δ-25kph 실측)하는 현상을 완화하기 위한 프레임간
     # 램프 리미터 상태값. None이면 리미터 미적용(최초 활성화/직후 상태).
     self._route_speed_prev = None
+    # [199차, 설계 A v3] apex_speed 불연속 감지 게이트 상태(위
+    # ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH 주석 참고). prev는 직전
+    # 프레임 apex_speed(불연속 판정 기준), armed는 이번 프레임 vEgo 기반
+    # 부스트 무장 여부, armed_speed는 무장 당시의 apex_speed(같은 급커브를
+    # 계속 추적 중인지 판정하는 기준값).
+    self._route_apex_speed_prev = None
+    self._route_apex_boost_armed = False
+    self._route_apex_boost_armed_speed = None
 
     self.active_carrot_last = False
 
@@ -597,6 +664,11 @@ class CarrotMan:
       # [132차] route 비활성화 -- 다음 활성화 시 리미터가 과거 값을 끌고
       # 오지 않도록 리셋(제약 해제 방향은 항상 즉시 반영되어야 안전).
       self._route_speed_prev = None
+      # [199차] 불연속 감지 게이트도 함께 리셋 -- route가 다시 활성화될
+      # 때 직전(비활성 이전) apex_speed와 비교해 오탐하지 않도록 한다.
+      self._route_apex_speed_prev = None
+      self._route_apex_boost_armed = False
+      self._route_apex_boost_armed_speed = None
       return [],[],300
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
@@ -758,9 +830,46 @@ class CarrotMan:
             self.carrot_serv.route_apex_speed = apex_speed
             self.carrot_serv.route_out_speed = out_speed
             out_speed = min(out_speed, 300.0)
-            # accel_limit_kmh는 더 이상 동적으로 변하지 않으므로(부스트 폐기)
-            # 고정값 -- 아래 132차 램프리미터가 그대로 사용.
-            accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
+            # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
+            # 그대로 사용.
+            base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
+            accel_limit_kmh = base_accel_limit_kmh
+
+            # [199차, 설계 A v3 -- 위 ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH
+            # 주석 참고] raw out_speed(위 out_speed)는 절대 건드리지 않는다
+            # (197차와 100% 동일 -- 이 블록 전체는 아래 132차 램프리미터의
+            # 하강 상한(accel_limit_kmh)에만 영향을 준다).
+            #
+            # 1) 불연속 감지: 직전 프레임 대비 apex_speed가 임계값 이상
+            #    떨어졌으면 새로 무장, 이미 무장된 상태면 apex_speed가
+            #    무장 당시 값 근방을 유지하는 동안 계속 무장 유지.
+            if self._route_apex_speed_prev is None:
+                # 최초 관측 -- 불연속 여부 판단 불가, 무장하지 않음(197차와
+                # diff-0가 기본값). 무장 안 된 다음 프레임부터 정상적으로
+                # 델타 비교가 시작된다(0.05s 지연, 무시 가능).
+                pass
+            else:
+                apex_delta_kph = self._route_apex_speed_prev - apex_speed  # 양수=더 급해짐
+                if apex_delta_kph > ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH:
+                    self._route_apex_boost_armed = True
+                    self._route_apex_boost_armed_speed = apex_speed
+                elif self._route_apex_boost_armed:
+                    if abs(apex_speed - self._route_apex_boost_armed_speed) > ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH:
+                        self._route_apex_boost_armed = False
+                        self._route_apex_boost_armed_speed = None
+            self._route_apex_speed_prev = apex_speed
+
+            # 2) 무장된 프레임에서만 vEgo 기반 필요감속도로 하강 상한을
+            #    동적 부스트(target 자체는 건드리지 않으므로 149/150차식
+            #    "목표 완화" 부작용이 구조적으로 불가능).
+            if self._route_apex_boost_armed and apex_dist > 0:
+                v_ego_ms = self.sm['carState'].vEgo
+                v_target_ms = apex_speed / 3.6
+                if v_ego_ms > v_target_ms:
+                    required_decel_mss = (v_ego_ms ** 2 - v_target_ms ** 2) / (2.0 * apex_dist)
+                    if required_decel_mss > self.carrot_serv.autoNaviSpeedDecelRate:
+                        boosted_mss = min(required_decel_mss, ROUTE_VEGO_BOOST_MAX_MSS)
+                        accel_limit_kmh = boosted_mss * 3.6
 
             # [132차, Hypothesis C(131차) 대응] route_lookahead_m 윈도우
             # 경계로 급커브 지점이 이산적으로 curvature 배열에 "출현"하는
@@ -838,6 +947,10 @@ class CarrotMan:
         # 다시 램프가 걸리도록 한다(과거 값에 묶여 완화가 지연되는 역설
         # 방지).
         self._route_speed_prev = None
+        # [199차] 불연속 감지 게이트도 동일 이유로 리셋.
+        self._route_apex_speed_prev = None
+        self._route_apex_boost_armed = False
+        self._route_apex_boost_armed_speed = None
         #self.params.remove("NavDestination")
 
     return resampled_points, resampled_distances, out_speed #speeds, distances
