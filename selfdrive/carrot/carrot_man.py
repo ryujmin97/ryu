@@ -929,8 +929,54 @@ class CarrotMan:
             # (3) apex_idx 오선택으로 raw가 298까지 튀어도, vEgo가 예를 들어
             # 55km/h면 상한이 max(55, apex_speed)로 즉시 눌려 202차가 막으려던
             # 스파이크의 근본 원인을 고정값(150)보다 더 직접적으로 차단한다.
+            # [207차, 206차 NEGATIVE 원인 대응] 206차가 199cha 8세그
+            # 실차로그로 205차를 재검증한 결과, apex_idx가 "road_limit
+            # 바로 아래인 사실상 무해한 근접 후보"(예: 297.5kph)를 가리키는
+            # 동안(t=418.42~423.18, 4.6초/92프레임 지속되는 "고원")에는
+            # apex_speed 자체도 함께 297~298 근방으로 오염되어, 바로 위
+            # max(v_ego_kph, apex_speed)가 오염된 apex_speed에 지배당해
+            # vEgo 하한이 전혀 작동하지 않았다(would_bind 37.1%->37.1%
+            # 불변, 완전 NEGATIVE 재확인). 그런데 이 "고원" 구간에서도
+            # 같은 lookahead 윈도우 안에는 이미 실제 북대전IC 급커브(더
+            # 멀리, 예: 230m/50kph)가 candidates 리스트 자체에는 들어있다
+            # (apex_idx가 "가장 가까운 후보"(196/197차 설계)라서 아직 그
+            # 지점을 가리키지 않을 뿐, 후보 존재 자체는 이미 계산돼있다 --
+            # 바로 위 204차 계측용 candidates 리스트, L839 참고).
+            #
+            # 따라서 "상한(ceiling)" 항에서만 apex_speed 대신 candidates
+            # 전체 중 가장 급한(=speed가 가장 낮은) 후보의 speed를 쓴다.
+            # apex_dist/apex_speed(raw 계산에 실제 쓰이는 값, 196/197차
+            # 1차->2차 순차처리 선택)는 전혀 건드리지 않는다 -- 이 값은
+            # 오직 "vEgo 기반 상한을 얼마나 관대하게 풀어줄지" 판단에만
+            # 쓰이는 별도 항이다. sharpest_candidate_speed는 정의상 항상
+            # apex_speed 이하이므로(apex_speed 자신도 candidates의 원소),
+            # 이 변경은 상한을 더 보수적으로(=더 낮게)만 만들 수 있고
+            # 완화(=상한이 더 높아짐) 방향의 회귀는 구조적으로 불가능하다.
+            # candidates가 비어있으면(완전 직선, 179차 폴백 경로) 기존과
+            # 동일하게 apex_speed로 폴백해 205차와 diff-0가 유지된다.
+            #
+            # 이 변경은 새로운 상태(state)를 추가하지 않는다(무상태, 매
+            # 프레임 candidates에서 즉시 재계산) -- 158/159차가 폐기한
+            # "명시적 3상태 히스테리시스"(stuck-disengaged 2/3, 프레임간
+            # 최대낙차 244km/h, FINDINGS.md 159차)와는 무관하며, 그 실패의
+            # 구조적 원인(상태 리셋으로 route_speed_prev가 300 쪽으로
+            # 즉시통과+점프)이 애초에 발생할 수 없다 -- _route_speed_prev
+            # 램프리미터는 205/206차와 완전히 동일하게 매 프레임 연속으로만
+            # 갱신된다.
+            #
+            # 사전검증(실차로그 없이 시나리오 기반, devnotes
+            # toolkit/sim_route_ceiling_sharpest_candidate_207.py, 6/6 PASS):
+            # 206차가 기록한 수치(apex_dist=70/apex_speed=297.5/vEgo=55,
+            # 같은 윈도우에 sharpest=50 후보 존재)를 재구성한 시나리오에서
+            # OLD(205차) out=150.0 -> NEW(207차) out=55.0으로 vEgo 상한이
+            # 실제로 작동함을 확인. 정상 직선복귀/연속 S자/candidates=[]
+            # 폴백 3개 대조 시나리오는 OLD와 diff-0(회귀 없음) 확인.
+            # **실차 검증: 미실시** -- 199cha 8세그 원본 로그(대용량, §23
+            # 대상)가 컨테이너 리셋으로 소실되어 이번 세션에서는 실측
+            # "실차 vs 실차" 재검증을 하지 못했다(NEEDS_VALIDATION).
+            sharpest_candidate_speed = min((speeds[k] for k in candidates), default=apex_speed) if candidates else apex_speed
             v_ego_kph = self.sm['carState'].vEgo * 3.6
-            out_speed = min(out_speed, max(v_ego_kph, apex_speed), ROUTE_MAX_SPEED_KPH)  # [205차] 동적 상한(vEgo/apex_speed) + 202차 절대 안전상한(150) 동시 적용
+            out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), ROUTE_MAX_SPEED_KPH)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체(205차 vEgo 상한 + 202차 절대 안전상한 150 유지)
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
             # 그대로 사용.
             base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
