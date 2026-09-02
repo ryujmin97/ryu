@@ -651,6 +651,12 @@ class CarrotMan:
     self._route_apex_dist = 0.0
     self._route_apex_speed = 0.0
     self._route_out_speed = 300.0
+    # [204차 계측, 203차 옵션1] candidate telemetry도 apex와 동일하게
+    # 매 호출 초기화 -- 이유는 위 193차 주석과 동일(직전 프레임 값 잔류 방지).
+    self._route_candidate_count = 0
+    self._route_candidate0 = (-1, 0.0, 0.0)
+    self._route_candidate1 = (-1, 0.0, 0.0)
+    self._route_candidate2 = (-1, 0.0, 0.0)
     # [194차] cereal로 실제 발행되는 CarrotServ 쪽 저장소도 동일하게
     # 매 호출 초기화 -- 이걸 빼먹으면 route가 비활성화된 프레임에서도
     # rlog에 직전 활성 프레임의 apex 값이 그대로 남아 오분석을 유발한다.
@@ -658,6 +664,17 @@ class CarrotMan:
     self.carrot_serv.route_apex_dist = 0.0
     self.carrot_serv.route_apex_speed = 0.0
     self.carrot_serv.route_out_speed = 300.0
+    # [204차 계측] 위와 동일 -- candidate telemetry도 CarrotServ 쪽에 동일 초기화.
+    self.carrot_serv.route_candidate_count = 0
+    self.carrot_serv.route_candidate0_idx = -1
+    self.carrot_serv.route_candidate0_dist = 0.0
+    self.carrot_serv.route_candidate0_speed = 0.0
+    self.carrot_serv.route_candidate1_idx = -1
+    self.carrot_serv.route_candidate1_dist = 0.0
+    self.carrot_serv.route_candidate1_speed = 0.0
+    self.carrot_serv.route_candidate2_idx = -1
+    self.carrot_serv.route_candidate2_dist = 0.0
+    self.carrot_serv.route_candidate2_speed = 0.0
 
     # [99차/100차, 죽은 코드 정리] 여기 있던 `if self.carrot_serv.active_carrot > 1:
     # if False and self.navd_active:` 블록은 항상 거짓이라 실행된 적이 없는
@@ -822,6 +839,29 @@ class CarrotMan:
             apex_dist = distances[apex_idx]
             apex_speed = speeds[apex_idx]
 
+            # [204차 계측, 203차 옵션1] apex로 선택되기 직전의 candidates
+            # 리스트(road_limit_speed 미만, 거리 오름차순) 그 자체를 관측용으로
+            # 보존한다. apex_idx/apex_speed 단일값만으로는 "허위 직선 스파이크
+            # (먼 후보로 순간 전환)"와 "정상적인 연속곡선/커브탈출가속 중 후보
+            # 전환"을 구분할 수 없다는 것이 203차 시뮬레이션(WIP.md 203차)의
+            # 결론 -- 이 값들로 실차 로그에서 candidates[]의 실제 구성(가까운
+            # 진짜 후보가 밀리는지 vs 후보 자체가 멀리만 있는지)을 직접 확인한다.
+            # candidates가 비어 179차 폴백(전역 최소)을 탄 경우는
+            # routeCandidateCount=0으로 노출하고 candidate0~2는 (-1,0,0) 유지.
+            self._route_candidate_count = len(candidates)
+            self._route_candidate0 = (-1, 0.0, 0.0)
+            self._route_candidate1 = (-1, 0.0, 0.0)
+            self._route_candidate2 = (-1, 0.0, 0.0)
+            if len(candidates) >= 1:
+                c_idx = candidates[0]
+                self._route_candidate0 = (c_idx, distances[c_idx], speeds[c_idx])
+            if len(candidates) >= 2:
+                c_idx = candidates[1]
+                self._route_candidate1 = (c_idx, distances[c_idx], speeds[c_idx])
+            if len(candidates) >= 3:
+                c_idx = candidates[2]
+                self._route_candidate2 = (c_idx, distances[c_idx], speeds[c_idx])
+
             out_speed = self.carrot_serv.calculate_current_speed(
                 apex_dist,
                 apex_speed,
@@ -844,6 +884,19 @@ class CarrotMan:
             self.carrot_serv.route_apex_dist = apex_dist
             self.carrot_serv.route_apex_speed = apex_speed
             self.carrot_serv.route_out_speed = out_speed
+            # [204차 계측] candidate telemetry도 apex와 동일하게 CarrotServ
+            # 쪽 저장소에 즉시 반영 -- carrot_serv.py의 update_navi()가
+            # cereal(msg.carrotMan)에 담을 수 있도록 한다(194차와 동일 이유).
+            self.carrot_serv.route_candidate_count = self._route_candidate_count
+            self.carrot_serv.route_candidate0_idx = self._route_candidate0[0]
+            self.carrot_serv.route_candidate0_dist = self._route_candidate0[1]
+            self.carrot_serv.route_candidate0_speed = self._route_candidate0[2]
+            self.carrot_serv.route_candidate1_idx = self._route_candidate1[0]
+            self.carrot_serv.route_candidate1_dist = self._route_candidate1[1]
+            self.carrot_serv.route_candidate1_speed = self._route_candidate1[2]
+            self.carrot_serv.route_candidate2_idx = self._route_candidate2[0]
+            self.carrot_serv.route_candidate2_dist = self._route_candidate2[1]
+            self.carrot_serv.route_candidate2_speed = self._route_candidate2[2]
             out_speed = min(out_speed, ROUTE_MAX_SPEED_KPH)  # [202차] 300.0 -> 150.0(명시적 상수)
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
             # 그대로 사용.
@@ -1014,6 +1067,11 @@ class CarrotMan:
     msg['route_apex_dist'] = getattr(self, '_route_apex_dist', 0.0)
     msg['route_apex_speed'] = getattr(self, '_route_apex_speed', 0.0)
     msg['route_out_speed'] = getattr(self, '_route_out_speed', 0.0)
+    # [204차 계측] JSON 디버그 경로도 cereal과 동일하게 candidate telemetry 노출.
+    msg['route_candidate_count'] = getattr(self, '_route_candidate_count', 0)
+    msg['route_candidate0'] = getattr(self, '_route_candidate0', (-1, 0.0, 0.0))
+    msg['route_candidate1'] = getattr(self, '_route_candidate1', (-1, 0.0, 0.0))
+    msg['route_candidate2'] = getattr(self, '_route_candidate2', (-1, 0.0, 0.0))
     msg['active'] = self.controls_active
     msg['xState'] = self.xState
     msg['trafficState'] = self.trafficState

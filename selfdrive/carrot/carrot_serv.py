@@ -172,6 +172,20 @@ class CarrotServ:
     self.route_apex_speed = 0.0
     self.route_out_speed = 300.0
 
+    # [204차 계측, 203차 옵션1] apex 선택 직전의 candidates 리스트(개수 +
+    # 최근접 3개) 관측용 저장 공간. 위 route_apex_* 와 동일한 이유/패턴으로
+    # carrot_man.py가 계산 직후 여기에 값을 써준다. 제어 로직에는 사용되지 않음.
+    self.route_candidate_count = 0
+    self.route_candidate0_idx = -1
+    self.route_candidate0_dist = 0.0
+    self.route_candidate0_speed = 0.0
+    self.route_candidate1_idx = -1
+    self.route_candidate1_dist = 0.0
+    self.route_candidate1_speed = 0.0
+    self.route_candidate2_idx = -1
+    self.route_candidate2_dist = 0.0
+    self.route_candidate2_speed = 0.0
+
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
     self.phone_latitude = 0.0
@@ -1245,6 +1259,19 @@ class CarrotServ:
     msg.carrotMan.routeApexDist = float(self.route_apex_dist)
     msg.carrotMan.routeApexSpeed = float(self.route_apex_speed)
     msg.carrotMan.routeOutSpeed = float(self.route_out_speed)
+    # [204차 계측, 203차 옵션1] candidate telemetry 실제 발행(custom.capnp @42~@51).
+    # carrot_man.py::carrot_navi_route()가 매 사이클 self.route_candidate* 에
+    # 값을 써주므로 여기서는 그대로 msg에 담기만 한다(위 apex와 동일 패턴).
+    msg.carrotMan.routeCandidateCount = int(self.route_candidate_count)
+    msg.carrotMan.routeCandidate0Idx = int(self.route_candidate0_idx)
+    msg.carrotMan.routeCandidate0Dist = float(self.route_candidate0_dist)
+    msg.carrotMan.routeCandidate0Speed = float(self.route_candidate0_speed)
+    msg.carrotMan.routeCandidate1Idx = int(self.route_candidate1_idx)
+    msg.carrotMan.routeCandidate1Dist = float(self.route_candidate1_dist)
+    msg.carrotMan.routeCandidate1Speed = float(self.route_candidate1_speed)
+    msg.carrotMan.routeCandidate2Idx = int(self.route_candidate2_idx)
+    msg.carrotMan.routeCandidate2Dist = float(self.route_candidate2_dist)
+    msg.carrotMan.routeCandidate2Speed = float(self.route_candidate2_speed)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')

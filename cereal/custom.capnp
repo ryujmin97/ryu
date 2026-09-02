@@ -71,6 +71,24 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	routeApexDist @39 : Float32;   # 현재위치 ~ apex까지 거리(m)
 	routeApexSpeed @40 : Float32;  # apex 지점 목표속도(km/h)
 	routeOutSpeed @41 : Float32;   # calculate_current_speed()가 계산한 route 최종 출력 속도(km/h, min(...,300.0) 적용 전 값)
+
+	# [204차 계측, 203차 사용자 결정 옵션1] apex_idx/speed 1개만으로는
+	# "허위 직선 스파이크(먼 후보로 순간 전환)"와 "정상적인 연속곡선/
+	# 커브탈출가속 중 후보 전환"을 구분할 수 없음이 203차 시뮬레이션으로
+	# 확인됨(WIP.md 203차 참고). carrot_navi_route()가 apex 선택 직전에
+	# 실제로 갖고 있던 후보 리스트(candidates, road_limit_speed 미만인
+	# 지점들, 거리 오름차순)의 개수와 최근접 3개를 그대로 노출한다.
+	# 제어 로직/값은 전혀 변경하지 않음 -- 순수 관측용 추가 필드.
+	routeCandidateCount @42 : Int32;  # candidates 리스트 길이. 0이면 179차 폴백(전역 최소, "직선" 판정) 경로
+	routeCandidate0Idx @43 : Int32;   # 최근접 후보(=apex로 선택된 candidates[0])의 speeds[] 인덱스. 없으면 -1
+	routeCandidate0Dist @44 : Float32;
+	routeCandidate0Speed @45 : Float32;
+	routeCandidate1Idx @46 : Int32;   # 두 번째로 가까운 후보. 없으면 -1
+	routeCandidate1Dist @47 : Float32;
+	routeCandidate1Speed @48 : Float32;
+	routeCandidate2Idx @49 : Int32;   # 세 번째로 가까운 후보. 없으면 -1
+	routeCandidate2Dist @50 : Float32;
+	routeCandidate2Speed @51 : Float32;
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {
