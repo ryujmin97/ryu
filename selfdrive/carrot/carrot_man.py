@@ -655,7 +655,16 @@ class CarrotMan:
     self._route_apex_idx = -1
     self._route_apex_dist = 0.0
     self._route_apex_speed = 0.0
-    self._route_out_speed = 300.0
+    # [211차, 사용자 지시] 비활성/제약없음 sentinel 300.0 -> ROUTE_MAX_SPEED_KPH(150.0)로
+    # 통일. 202차는 "활성 상한(150)"과 "비활성 sentinel(300)"을 의도적으로 구분되게
+    # 남겨뒀으나(로그 분석 시 둘을 구별하기 위함), 사용자가 HUD route= 표시값이
+    # 390(=300*mapTurnSpeedFactor 1.30, 210차에서 곱셈 자체는 제거됨)처럼 비현실적인
+    # 값으로 보이는 것을 막기 위해 sentinel 자체도 150으로 낮추도록 지시.
+    # 부작용(반드시 인지): 이후 CSV의 routeOutSpeed==150은 "비활성/제약없음"과
+    # "활성 상태에서 실제로 150 상한에 걸림"을 더 이상 값만으로 구분할 수 없다
+    # (구분이 필요하면 routeApexIdx==-1 여부로 대체 판별 가능 -- apex 계산이 아예
+    # 돌지 않은 프레임은 routeApexIdx가 -1로 유지됨).
+    self._route_out_speed = ROUTE_MAX_SPEED_KPH
     # [204차 계측, 203차 옵션1] candidate telemetry도 apex와 동일하게
     # 매 호출 초기화 -- 이유는 위 193차 주석과 동일(직전 프레임 값 잔류 방지).
     self._route_candidate_count = 0
@@ -668,7 +677,7 @@ class CarrotMan:
     self.carrot_serv.route_apex_idx = -1
     self.carrot_serv.route_apex_dist = 0.0
     self.carrot_serv.route_apex_speed = 0.0
-    self.carrot_serv.route_out_speed = 300.0
+    self.carrot_serv.route_out_speed = ROUTE_MAX_SPEED_KPH  # [211차] 300.0 -> 150.0, 위 self._route_out_speed와 동일 이유
     # [204차 계측] 위와 동일 -- candidate telemetry도 CarrotServ 쪽에 동일 초기화.
     self.carrot_serv.route_candidate_count = 0
     self.carrot_serv.route_candidate0_idx = -1
@@ -706,13 +715,13 @@ class CarrotMan:
       self._route_apex_speed_prev = None
       self._route_apex_boost_armed = False
       self._route_apex_boost_armed_speed = None
-      return [],[],300
+      return [],[],ROUTE_MAX_SPEED_KPH  # [211차] 300 -> 150, 위 self._route_out_speed와 동일 이유
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
     heading_deg = self.carrot_serv.bearing
 
     distance_interval = 10.0
-    out_speed = 300
+    out_speed = ROUTE_MAX_SPEED_KPH  # [211차] 300 -> 150, 위 self._route_out_speed와 동일 이유(경로는 활성이나 lookahead 내 유효 포인트가 부족해 이 기본값이 그대로 반환되는 경우 포함)
     # [84차, 85차 500->600 상향] 300m 고정 캡 -> v_ego/accel_limit 기반 동적 캡(300~600m)
     route_lookahead_m = compute_route_lookahead_distance(self.sm['carState'].vEgo * 3.6,
                                                           self.carrot_serv.autoNaviSpeedDecelRate)

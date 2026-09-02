@@ -1247,26 +1247,31 @@ protected:
             ui_draw_text(s, tbt_x + 20, tbt_y + 195, line1.c_str(), fs1, COLOR_WHITE, BOLD);
           }
 
-          // 2줄: "route=" + 숫자(강조) -- 156차: 숫자를 박스 오른쪽 끝에 정렬
+          // 2줄: "route=" + 숫자(강조)
+          // [211차, 사용자 지시] 156차가 도입한 "숫자 2배 크기 + 박스 우측끝 정렬"을
+          // 되돌린다: (1) 숫자 크기 2배 -> 1.5배로 축소, (2) 우측끝(right_edge) 정렬
+          // 대신 156차 이전 방식(nvgTextBounds로 prefix 폭을 구해 숫자를 prefix
+          // 바로 뒤에 이어서 그리는 방식)으로 복원.
           if (line2.length() > 0) {
             size_t eq = line2.find('=');
             std::string prefix = (eq == std::string::npos) ? line2 : line2.substr(0, eq + 1); // "route="
             std::string number = (eq == std::string::npos) ? "" : line2.substr(eq + 1);        // "145.1"
 
             const int fs_prefix = 26;      // 기존 하단 텍스트와 비슷한 크기
-            const int fs_number = fs_prefix * 2; // 요청사항: 숫자만 2배 크기
+            const int fs_number = (fs_prefix * 3) / 2; // [211차] 2배(fs_prefix*2) -> 1.5배로 축소
             float line2_y = tbt_y + 235; // 1줄 아래 여백(약 40px)
-            float right_edge = tbt_x + TBT_BOX_W - 20; // 박스 우측 여백 20px
 
+            float px = tbt_x + 20;
             if (prefix.length() > 0) {
-              nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
-              ui_draw_text(s, tbt_x + 20, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
+              nvgFontSize(s->vg, fs_prefix);
+              nvgFontFace(s->vg, BOLD);
+              float bounds[4];
+              nvgTextBounds(s->vg, px, line2_y, prefix.c_str(), NULL, bounds);
+              ui_draw_text(s, px, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
+              px = bounds[2]; // prefix 뒤에 이어서 숫자 시작
             }
             if (number.length() > 0) {
-              // 숫자만 우측 정렬로 박스 오른쪽 끝에 맞춤
-              nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
-              ui_draw_text(s, right_edge, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
-              nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM); // 다음 루프/블록 위해 원복
+              ui_draw_text(s, px, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
             }
           }
         }
