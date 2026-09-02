@@ -78,29 +78,16 @@ ROUTE_CURVE_NEGLIGIBLE_THRESHOLD = 0.001
 # 필드가 이미 발행 중이었는데 extract_log.py가 뽑지 않았던 것).
 ROUTE_CURVATURE_FINE_SAMPLE = 1
 
-# [179차 후속2, 대안1 채택 -- 상대적 심각도 게이트] 179차의 "가장 가까운
-# 지점" apex 선택(아래 carrot_navi_route() 참고)은 근접 미세잡음(floor
-# 0.001 바로 위, curv~0.01~0.02)에도 반응해 60~100m 앞의 진짜 급커브를
-# 무시하는 부작용이 실측(route 00000374, t≈753.5~759.3)으로 확인됐다
-# (179차 계속, sharpest 대비 최대 9.72km/h 더 높은/덜 안전한 출력).
-# "도로제한속도 대비 절대 비율" 게이트(179차 후속 1차 시도)는 lookup
-# 테이블(V_CURVE_LOOKUP_BP/VALS)이 저곡률 구간에서 비선형(가파름)이라
-# 잡음이 실제 완만한 커브보다 오히려 더 "심각"하게 나오는 역전이 있어
-# 폐기(NEGATIVE, 12/12 유닛테스트로 확정). 대신 "같은 lookahead 윈도우
-# 내 가장 급한 지점(sharpest) 대비 후보 지점의 상대적 심각도 비율"을
-# 게이트로 쓰면 이 역전 문제를 피할 수 있음을 확인(POSITIVE, 179차
-# 후속2, 실함수 호출 기준 유닛테스트 15/15 PASS). severity(k) :=
-# nRoadLimitSpeed - speeds[k]로 정의, candidates(감속 필요 지점) 중
-# severity(k) >= ROUTE_APEX_RELATIVE_SEVERITY_RATIO * sharpest_severity
-# 인 가장 가까운 지점을 선택 -- 그런 지점이 없으면 게이트 없는 기존
-# nearest(가장 가까운 후보)로 폴백(게이트 때문에 아예 반응 안 하는
-# 것보다 안전 쪽 폴백). 기본값 0.85는 검증2(curve1, 상대severity=0.962,
-# 유지되어야 함)와 검증1(noise, 상대severity=0.795, 차단되어야 함) 사이
-# 워킹 구간(0.80~0.95)의 중간값. 사전검증: devnotes toolkit/
-# sim_route_camera_style_decel.py::carrot_navi_route_camera_style_nearest_relative_gated()
-# (179차 후속2). **오프라인 replay_route_camera_style_vs_baseline.py
-# 재검증 및 실차 검증은 아직 수행하지 않음(사용자 담당).**
-ROUTE_APEX_RELATIVE_SEVERITY_RATIO = 0.85
+# [196차, 179차후속2 게이트 폐기] 179차후속2가 도입했던 상대적 심각도
+# 게이트(ROUTE_APEX_RELATIVE_SEVERITY_RATIO, 아래 carrot_navi_route()
+# 참고)를 제거했다. 연속곡선을 1차->2차 순서로 처리하는 설계(사용자
+# 원본 설계문서 `곡선_가감속_코딩.txt` 5번)를 위해서는 근접 감속필요
+# 지점을 게이트 없이 무조건 우선해야 하기 때문. 이 게이트가 막고
+# 있던 근접 미세잡음 오탐(179차 계속, sharpest 대비 최대 9.72km/h
+# 덜 안전한 출력 -- route 00000374, t≈753.5~759.3 실측)이 이 변경으로
+# 다시 열릴 수 있으므로 실차 검증 필수(196차 실차 검증: 미실시). 게이트
+# 도입 배경/실험(유닛테스트 15/15 PASS 등)은 devnotes FINDINGS.md
+# 179차/179차후속2 항목에 그대로 보존되어 있다(삭제하지 않음, §24).
 
 # [162차, 방향2 - 보수적 완화] carrot_serv.py::_update_gps()가 계산하는
 # position_dt_since_fix(마지막 실제 위치 fix 이후 데드레커닝 경과시간)가
@@ -695,9 +682,10 @@ class CarrotMan:
             # 사전감속" -- apex(최대곡률지점) 목표속도를 과속카메라의
             # 제한속도처럼 취급해, 카메라와 동일하게 서서히 감속 ->
             # apex 도달(거리<=0) 시 원복하는 형태로 단순화한다.
-            # apex 선택 기준은 157차와 동일하게 "가장 급한 지점"(lookahead
-            # 내 목표속도 최저점)을 유지 -- 순차(1차->2차) 처리를 위한 별도
-            # 상태는 도입하지 않는다. 이 함수가 매 20Hz마다 lookahead
+            # [196차] 전방 lookahead 전체의 sharpest(전역 최저 목표속도)를
+            # 하나의 apex로 선택하지 않는다. 연속곡선을 1차->2차 순서로
+            # 처리하기 위해 "가장 먼저 만나는 감속 필요 지점"을 apex로
+            # 선택(아래 candidates[0]). 이 함수는 20Hz마다 lookahead
             # 윈도우를 새로 계산하는 무상태(stateless) 구조이므로,
             # "1차 apex를 지나면(=1차 지점이 차량 뒤로 빠져 윈도우에서
             # 사라지면) 다음 프레임에 자동으로 2차 apex가 새로 선택"된다
@@ -733,22 +721,17 @@ class CarrotMan:
             # (전부 직선) 기존과 동일하게 전역 min(speeds)로 폴백 --
             # 이 경우 모든 speeds가 사실상 도로제한속도이므로 어느 지점을
             # 골라도 out_speed에 미치는 영향은 없다.
-            # [179차 후속2] "가장 가까운 지점"(candidates) 선택 이후,
-            # 그 중 sharpest(윈도우 내 최댓 severity) 대비 상대적으로
-            # 심각한(=ROUTE_APEX_RELATIVE_SEVERITY_RATIO 이상) 지점만
-            # 후보로 남기는 상대적 심각도 게이트를 추가 적용.
+            # [196차, 179차후속2 게이트 제거] "가장 가까운 지점"(candidates)
+            # 선택 이후 sharpest 대비 상대적 심각도로 재필터링하던 게이트를
+            # 제거했다. candidates[0](거리 오름차순 첫 감속 필요 지점)을
+            # 게이트 없이 그대로 apex로 선택 -- 이유는 위 상수 정의부 주석
+            # 참고. 실차 검증 필수(196차 실차 검증: 미실시).
             road_limit_speed = self.carrot_serv.nRoadLimitSpeed
             candidates = [k for k in range(len(speeds)) if speeds[k] < road_limit_speed]
             if not candidates:
                 apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])  # 폴백: 감속필요구간 없음(직선)
             else:
-                sharpest_severity = road_limit_speed - min(speeds[k] for k in candidates)
-                gated = [
-                    k for k in candidates
-                    if sharpest_severity > 0
-                    and (road_limit_speed - speeds[k]) >= ROUTE_APEX_RELATIVE_SEVERITY_RATIO * sharpest_severity
-                ]
-                apex_idx = gated[0] if gated else candidates[0]  # 게이트 미통과 시 게이트 없는 nearest로 폴백
+                apex_idx = candidates[0]
             apex_dist = distances[apex_idx]
             apex_speed = speeds[apex_idx]
 
