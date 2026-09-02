@@ -301,6 +301,10 @@ class CarrotServ:
     self.autoNaviSpeedDecelRate = float(self.params.get_int("AutoNaviSpeedDecelRate")) * 0.01
     self.autoNaviCountDownMode = self.params.get_int("AutoNaviCountDownMode")
     self.turnSpeedControlMode= self.params.get_int("TurnSpeedControlMode")
+    # [210차] 이 값을 곱하던 유일한 사용처(update_navi() route_speed 계산,
+    # 아래 L~1101 부근)를 제거함 -- 현재는 어디에서도 쓰이지 않는 죽은 값이다.
+    # UI 슬라이더("경로턴속도반영비율")와 params_keys.h 기본값은 그대로
+    # 남겨둠(최소변경 원칙, §27) -- 필요시 향후 재사용/제거는 별도 논의.
     self.mapTurnSpeedFactor= self.params.get_float("MapTurnSpeedFactor") * 0.01
 
     self.autoTurnControlSpeedTurn = self.params.get_int("AutoTurnControlSpeedTurn")
@@ -1098,7 +1102,20 @@ class CarrotServ:
     if self.turnSpeedControlMode in [1,2]:
       speed_n_sources.append((max(abs(vturn_speed), self.autoCurveSpeedLowerLimit), "vturn"))
 
-    route_speed = max(route_speed * self.mapTurnSpeedFactor, self.autoCurveSpeedLowerLimit)
+    # [210차, 사용자 실차 스크린샷 제보 대응 -- 삭제] 기존엔 여기서
+    # route_speed(carrot_man.py::carrot_navi_route()가 205/207차에서
+    # "max(v_ego_kph, sharpest_candidate_speed)"로 vEgo 상한을 이미 적용해
+    # 반환한 값)에 mapTurnSpeedFactor(사용자 실측 설정값 1.30, PARAMS_REGISTRY.md
+    # 201차)를 다시 곱하고 있었다. 곱셈이 vEgo 상한 *이후*에 걸리기 때문에,
+    # 205/207차가 만든 "route는 현재속도보다 빠른 속도를 권하지 않는다"는
+    # 불변식이 최종 출력(HUD route= 표시값, arbitration 후보값) 단계에서는
+    # 성립하지 않았다 -- 210차 실차 스크린샷(vEgo=53, route=62.7,
+    # 62.7/1.30=48.2로 vEgo 상한 적용 전 raw 값과 일치)으로 실측 확인.
+    # 사용자 판단(210차)으로 이 배율 자체를 완전히 제거 -- MapTurnSpeedFactor는
+    # 이 곱셈이 repo 내 유일한 사용처였으므로(라인 304 주석 참고) route
+    # 감속에 대해서는 이제 관여하지 않는다. autoCurveSpeedLowerLimit 바닥은
+    # 그대로 유지(route가 이 값 밑으로는 내려가지 않는 기존 하한).
+    route_speed = max(route_speed, self.autoCurveSpeedLowerLimit)
     if self.turnSpeedControlMode in [2, 3, 4]:
       # 81차: mode 2의 -500<xDistToTurn<500(TBT 회전지점 근접) 게이트를 제거.
       # 기존엔 TBT 안내가 없는 일반 도로 굽이길에서 route_speed가 계산은 되고도
