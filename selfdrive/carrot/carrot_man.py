@@ -991,7 +991,37 @@ class CarrotMan:
             # **실차 검증: 미실시** -- 199cha 8세그 원본 로그(대용량, §23
             # 대상)가 컨테이너 리셋으로 소실되어 이번 세션에서는 실측
             # "실차 vs 실차" 재검증을 하지 못했다(NEEDS_VALIDATION).
-            sharpest_candidate_speed = min((speeds[k] for k in candidates), default=apex_speed) if candidates else apex_speed
+            # [214차, 213차 버그 대응 -- 사용자 확정] 위 207차 ceiling(sharpest_candidate_speed)은
+            # candidate의 speed만 보고 거리를 무시해, 1차 apex 통과 후 2차가 아직 멀리 있어도
+            # ceiling이 계속 낮게 묶여 원복을 막는 버그가 있었다(WIP 213차, "1차->2차 사이
+            # 저속유지"). 사용자 설계 문서(곡선_가감속_코딩.txt) 5번 -- "1차 apex 도달 시 원복,
+            # 2차 apex 목표속도를 바로 계산해 기본곡선 로직 적용(더 급한 쪽 기준)" -- 원칙에 따라,
+            # ceiling도 apex_dist/apex_speed와 동일한 물리공식(calculate_current_speed, 카메라
+            # 감속과 동일)을 candidate마다 재사용하도록 교체. 새 상수/새 상태 없음(§27 최소변경) --
+            # apex_dist/apex_speed(raw 계산에 쓰이는 값, 179/196차 선택 로직)는 전혀 건드리지 않고,
+            # 오직 "상한을 얼마나 관대하게 풀어줄지" 판단하는 이 항에만 거리를 반영한다.
+            # 거리가 멀면 raw가 road_limit 근처로 높게 나와 원복을 허용하고, 감속거리 안으로
+            # 들어오면 자연히 낮아지며 가장 급한 candidate 쪽으로 수렴한다(진동 없음, 단조수렴 --
+            # 214차 시나리오3/3b/4 확인).
+            #
+            # 사전검증(devnotes toolkit/sim_route_ceiling_distance_aware_214.py, 8/8 PASS):
+            # - 시나리오1(207차 회귀 방어, apex=70m/297.5kph trivial, sharpest=230m/50kph,
+            #   vEgo=55): OLD out=55.00 -> NEW out=70.07. NEW가 OLD보다 높은 것은 버그가
+            #   아니라 설계 의도 그 자체(230m 거리를 반영해 "아직 완전감속 불필요"로 판단) --
+            #   사용자가 이 수치를 직접 확인 후 NEW로 확정(214차 판정 완료).
+            # - 시나리오3b(213차 버그 재현): OLD out=40.00(저속유지 버그 재현) vs
+            #   NEW out=75.05(원복 허용, 버그 해소) -- 가장 명확한 개선 확인.
+            # - 나머지(시나리오2/3/4, 대조군1~3): 조기고정 없음, 단조수렴, 205~207차 기존
+            #   시나리오 회귀 없음(대조군3 candidates=[] 폴백은 OLD=NEW 완전 동일, diff-0).
+            # **실차 검증: 미실시** -- 213차 실차 검증(20m 하드플로어)과 함께 이월.
+            sharpest_candidate_speed = min(
+                (self.carrot_serv.calculate_current_speed(
+                    distances[k], speeds[k],
+                    self.carrot_serv.autoNaviSpeedCtrlEnd,
+                    self.carrot_serv.autoNaviSpeedDecelRate,
+                ) for k in candidates),
+                default=apex_speed
+            ) if candidates else apex_speed
             v_ego_kph = self.sm['carState'].vEgo * 3.6
             out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), ROUTE_MAX_SPEED_KPH)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체(205차 vEgo 상한 + 202차 절대 안전상한 150 유지)
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
