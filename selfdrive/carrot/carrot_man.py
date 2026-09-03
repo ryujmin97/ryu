@@ -1016,7 +1016,22 @@ class CarrotMan:
                 default=apex_speed
             ) if candidates else apex_speed
             v_ego_kph = self.sm['carState'].vEgo * 3.6
-            out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), ROUTE_MAX_SPEED_KPH)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체(205차 vEgo 상한 + 202차 절대 안전상한 150 유지)
+            # [217차, 사용자 설계문서 "Route 감속 다음 설계 방향" 2번 -- 상한을
+            # 150 고정 대신 설정속도(vCruise) 기준으로 전환] 기존엔 이 ceiling
+            # 항이 항상 ROUTE_MAX_SPEED_KPH(150) 고정이라, 먼 후속 후보(예:
+            # apex_dist=300m대)의 raw 물리계산값이 150을 넘기면 그대로 150에서
+            # 클램프됐다. 215차 실차로그(t=375.5, vCruise=55 고정 구간에서
+            # liveRouteSpeed가 정확히 150.0에서 클램프된 뒤 172/173차 하강램프
+            # (2.52km/h/s)로 약 30초에 걸쳐 서서히 30kph대까지 내려오는 것을
+            # 실측) -- "150에서 천천히 감속 시작"이라는 사용자 제보의 직접
+            # 원인. 설정속도(vCruise)가 150보다 낮은 게 일반적이므로, ceiling을
+            # min(vCruise, 150)으로 낮추면 스파이크 자체가 vCruise 근방에서
+            # 시작해 램프 하강 구간이 크게 줄어든다(위 예시 기준 150->30
+            # 이었을 구간이 55->30로 단축). vCruise<=0(크루즈 비활성 등
+            # 비정상값)일 때는 기존 150 그대로 폴백해 회귀 없음.
+            v_cruise_kph = self.sm['carState'].vCruise
+            route_ceiling_kph = min(v_cruise_kph, ROUTE_MAX_SPEED_KPH) if v_cruise_kph > 0 else ROUTE_MAX_SPEED_KPH
+            out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), route_ceiling_kph)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체 / [217차] 150 고정 -> min(vCruise,150)
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
             # 그대로 사용.
             base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
