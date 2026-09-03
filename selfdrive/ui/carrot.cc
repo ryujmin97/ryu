@@ -1119,6 +1119,11 @@ protected:
                                              // 1줄->2줄로 늘어나며 필요한 세로 여백 40px 추가
     static constexpr int TBT_MARGIN_R = 10; // 우측 여백 (기존과 동일)
     static constexpr int TBT_ICON_SIZE = 140; // 기존 icon_size(256) 대신 축소 전용 크기 사용
+    // [230차] 하단 도로명 줄바꿈용: 줄바꿈 1줄당 필요한 세로 높이 / 최대 줄 수.
+    // 도로명이 길어 2줄로 줄바꿈되면 박스 높이를 이만큼 위쪽으로 확장한다
+    // (박스 하단 좌표는 고정, 상단만 위로 이동 — 다른 요소 위치 영향 없음).
+    static constexpr int TBT_LINE_STEP = 40;
+    static constexpr int TBT_MAX_NAME_LINES = 2;
 
     int  drawTurnInfoHud(const UIState* s) {
       if (s->fb_w < 1200) return -1;
@@ -1140,7 +1145,56 @@ protected:
 
         int tbt_x = s->fb_w - (TBT_BOX_W + TBT_MARGIN_R);
         int tbt_y = s->fb_h - 250;
+        int right_x = tbt_x + TBT_BOX_W - 20; // [230차] 하단 두 줄(도로명/route=) 우측끝 정렬 기준 x좌표
         NVGcolor stroke_color = COLOR_WHITE;
+
+        // [230차] 도로명(szPosRoadName 1줄)이 박스 폭을 넘으면 최대
+        // TBT_MAX_NAME_LINES줄까지 자동 줄바꿈. 아래 박스를 그리기 전에 먼저
+        // 계산해서, 줄바꿈이 실제로 필요한 만큼만 박스 높이를 위로 넉넉하게 잡는다.
+        auto wrap_name_lines = [&](const std::string& txt, float avail_w) {
+          std::vector<std::string> lines;
+          int fs = 30;
+          for (; fs >= 20; fs -= 2) {
+            nvgFontSize(s->vg, fs);
+            nvgFontFace(s->vg, BOLD);
+            float bounds[4];
+            nvgTextBounds(s->vg, 0, 0, txt.c_str(), NULL, bounds);
+            if (bounds[2] - bounds[0] <= avail_w) {
+              lines.clear();
+              lines.push_back(txt);
+              break;
+            }
+            NVGtextRow rows[TBT_MAX_NAME_LINES];
+            int nrows = nvgTextBreakLines(s->vg, txt.c_str(), NULL, avail_w, rows, TBT_MAX_NAME_LINES);
+            bool covers_all = (nrows > 0) && (rows[nrows - 1].end == txt.c_str() + txt.size());
+            if (covers_all || fs <= 20) {
+              lines.clear();
+              for (int i = 0; i < nrows; i++) lines.push_back(std::string(rows[i].start, rows[i].end));
+              break;
+            }
+          }
+          return std::make_pair(fs, lines);
+        };
+
+        std::string name_line1, name_line2;
+        std::vector<std::string> name_wrapped;
+        int name_fs = 30;
+        int tbt_extra_h = 0;
+        if (szSdiDescr.length() == 0 && szPosRoadName.length() > 0) {
+          std::string full = szPosRoadName.toStdString();
+          size_t nl = full.find('\n');
+          name_line1 = (nl == std::string::npos) ? full : full.substr(0, nl);
+          name_line2 = (nl == std::string::npos) ? "" : full.substr(nl + 1);
+          if (name_line1.length() > 0) {
+            auto result = wrap_name_lines(name_line1, TBT_BOX_W - 40);
+            name_fs = result.first;
+            name_wrapped = result.second;
+            if (name_wrapped.size() > 1) {
+              tbt_extra_h = (int)(name_wrapped.size() - 1) * TBT_LINE_STEP;
+            }
+          }
+        }
+
         if (s->scene._current_carrot_display == 3) {
           ui_fill_rect(s->vg, { tbt_x, 5, TBT_BOX_W, s->fb_h - 15 }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
         }
@@ -1148,7 +1202,8 @@ protected:
         else return -1;
         if (s->scene._current_carrot_display == 3);
         else {
-          ui_fill_rect(s->vg, { tbt_x, tbt_y - 60, TBT_BOX_W, TBT_BOX_H }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
+          // [230차] 상단만 tbt_extra_h만큼 위로 확장(하단 좌표는 그대로 유지)
+          ui_fill_rect(s->vg, { tbt_x, tbt_y - 60 - tbt_extra_h, TBT_BOX_W, TBT_BOX_H + tbt_extra_h }, COLOR_BLACK_ALPHA(120), 30, 2, &stroke_color);
         }
         // 상단: 안내 문구 (예: "분기점")
         if (szTBTMainText.length() > 0) {
@@ -1233,45 +1288,49 @@ protected:
             ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
         }
         else if (szPosRoadName.length() > 0) {
-          // 154차: 도로명(1줄) + route=NN.N(2줄)로 분리해서 그림.
-          // 파이썬(carrot_serv.py)에서 '\n'으로 구분해서 보내주므로 여기서 split.
-          // route= 뒤 숫자만 초록색 + 2배 크기로 강조.
-          std::string full = szPosRoadName.toStdString();
-          size_t nl = full.find('\n');
-          std::string line1 = (nl == std::string::npos) ? full : full.substr(0, nl);
-          std::string line2 = (nl == std::string::npos) ? "" : full.substr(nl + 1);
+          // 154차: 도로명(1줄) + route=NN.N(2줄)로 분리해서 그림(name_line1/name_line2는
+          // 박스 크기 계산 시점에 이미 split·줄바꿈 계산 완료 — 위쪽 참고).
+          // [230차, 사용자 지시] 두 줄 모두 박스 우측끝(right_x) 정렬로 변경.
+          // 도로명이 길면 자동 줄바꿈(최대 TBT_MAX_NAME_LINES줄), 넘치는 만큼
+          // 박스가 위로 커져 있어 전부 표시됨(그래도 넘치면 폰트 20까지 축소,
+          // 최후에는 잘림 감수 — 128차 이후 기존 정책과 동일).
 
-          // 1줄: 도로명
-          if (line1.length() > 0) {
-            int fs1 = fit_bottom_text_size(line1.c_str());
-            ui_draw_text(s, tbt_x + 20, tbt_y + 195, line1.c_str(), fs1, COLOR_WHITE, BOLD);
+          // 1줄(들): 도로명, 우측끝 정렬. 마지막 줄이 기존과 동일한 y(tbt_y+195)에
+          // 오도록 하고, 추가된 줄은 그 위(TBT_LINE_STEP 간격)로 쌓는다.
+          if (!name_wrapped.empty()) {
+            nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+            int n = (int)name_wrapped.size();
+            for (int i = 0; i < n; i++) {
+              int line_y = tbt_y + 195 - (n - 1 - i) * TBT_LINE_STEP;
+              ui_draw_text(s, right_x, line_y, name_wrapped[i].c_str(), name_fs, COLOR_WHITE, BOLD);
+            }
           }
 
-          // 2줄: "route=" + 숫자(강조)
-          // [211차, 사용자 지시] 156차가 도입한 "숫자 2배 크기 + 박스 우측끝 정렬"을
-          // 되돌린다: (1) 숫자 크기 2배 -> 1.5배로 축소, (2) 우측끝(right_edge) 정렬
-          // 대신 156차 이전 방식(nvgTextBounds로 prefix 폭을 구해 숫자를 prefix
-          // 바로 뒤에 이어서 그리는 방식)으로 복원.
-          if (line2.length() > 0) {
-            size_t eq = line2.find('=');
-            std::string prefix = (eq == std::string::npos) ? line2 : line2.substr(0, eq + 1); // "route="
-            std::string number = (eq == std::string::npos) ? "" : line2.substr(eq + 1);        // "145.1"
+          // 2줄: "route=" + 숫자(강조). prefix+숫자를 하나의 단위로 우측끝(right_x)에
+          // 정렬(숫자 오른쪽 끝이 right_x, prefix가 그 왼쪽에 바로 이어 붙음).
+          // [230차, 사용자 지시] 폰트 크기를 최초 구현(154/156차) 당시 값으로 원복:
+          // 211차가 축소했던 1.5배(fs_prefix*3/2) -> 2배(fs_prefix*2)로 되돌림.
+          if (name_line2.length() > 0) {
+            size_t eq = name_line2.find('=');
+            std::string prefix = (eq == std::string::npos) ? name_line2 : name_line2.substr(0, eq + 1); // "route="
+            std::string number = (eq == std::string::npos) ? "" : name_line2.substr(eq + 1);            // "145.1"
 
-            const int fs_prefix = 26;      // 기존 하단 텍스트와 비슷한 크기
-            const int fs_number = (fs_prefix * 3) / 2; // [211차] 2배(fs_prefix*2) -> 1.5배로 축소
-            float line2_y = tbt_y + 235; // 1줄 아래 여백(약 40px)
+            const int fs_prefix = 26;         // 기존과 동일
+            const int fs_number = fs_prefix * 2; // [230차] 원복: 154/156차 당시의 2배
+            float line2_y = tbt_y + 235;      // 박스 하단쪽 절대좌표, 줄바꿈 여부와 무관하게 고정
 
-            float px = tbt_x + 20;
-            if (prefix.length() > 0) {
-              nvgFontSize(s->vg, fs_prefix);
+            nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+            float number_w = 0;
+            if (number.length() > 0) {
+              nvgFontSize(s->vg, fs_number);
               nvgFontFace(s->vg, BOLD);
               float bounds[4];
-              nvgTextBounds(s->vg, px, line2_y, prefix.c_str(), NULL, bounds);
-              ui_draw_text(s, px, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
-              px = bounds[2]; // prefix 뒤에 이어서 숫자 시작
+              nvgTextBounds(s->vg, 0, 0, number.c_str(), NULL, bounds);
+              number_w = bounds[2] - bounds[0];
+              ui_draw_text(s, right_x, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
             }
-            if (number.length() > 0) {
-              ui_draw_text(s, px, line2_y, number.c_str(), fs_number, COLOR_GREEN, BOLD);
+            if (prefix.length() > 0) {
+              ui_draw_text(s, right_x - number_w, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
             }
           }
         }

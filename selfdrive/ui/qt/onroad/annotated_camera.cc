@@ -34,7 +34,9 @@ AnnotatedCameraWidget::AnnotatedCameraWidget(VisionStreamType type, QWidget *par
 	record_timer->start(1000/UI_FREQ);
 
 	recorder = new ScreenRecoder(this);
-	main_layout->addWidget(recorder, 0, Qt::AlignBottom | Qt::AlignRight);
+	// [230차] 녹화버튼 x축을 화면 우측 -> 화면 전체 가운데(하단 중앙)로 이동.
+	// y축(AlignBottom)은 그대로 유지, x축만 AlignRight -> AlignHCenter로 변경.
+	main_layout->addWidget(recorder, 0, Qt::AlignBottom | Qt::AlignHCenter);
   
 }
 
