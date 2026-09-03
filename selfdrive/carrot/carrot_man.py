@@ -647,6 +647,15 @@ class CarrotMan:
       # 동안 stale True가 남아 carrot_serv 클램프 판정을 오염시키지 않도록.
       self.route_inert = False
       self.route_release_time = None
+      # [229차, ChatGPT 228차 코드리뷰 지적 검증+수정] 이 조기 return은 함수
+      # 말미(1039/1045행)의 유일한 carrot_serv mirror 지점에 도달하지 못해,
+      # mode 0/1로 머무는 동안 carrot_serv.route_active/route_inert가 직전
+      # 프레임 값에 stale하게 고정될 수 있었다(현재는 route_speed=None이라
+      # carrot_serv.py의 클램프 블록 자체가 스킵되어 즉시 차량 거동에 영향은
+      # 없으나, 향후 이 두 필드를 다른 로직이 참조하면 회귀 소지 -- FINDINGS.md
+      # 229차). route_active/route_inert와 동일한 mirroring 패턴을 여기도 적용.
+      self.carrot_serv.route_active = self.route_active
+      self.carrot_serv.route_inert = self.route_inert
       return [], [], None
 
     # [223차, design doc §11/§12] apex RELEASE 직후 2초간 완전 OFF -- 새
@@ -683,6 +692,10 @@ class CarrotMan:
       # [228차] navi 비활성으로 인한 즉시 해제 시에도 route_inert를
       # 함께 초기화(위 mode 0/1 분기와 동일 이유).
       self.route_inert = False
+      # [229차, 위 mode 0/1 분기와 동일 이유] 이 조기 return도 함수 말미의
+      # 유일한 mirror 지점을 건너뛰므로 여기서도 명시적으로 mirror한다.
+      self.carrot_serv.route_active = self.route_active
+      self.carrot_serv.route_inert = self.route_inert
       return [], [], None
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
