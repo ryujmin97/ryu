@@ -89,112 +89,54 @@ ROUTE_CURVATURE_FINE_SAMPLE = 1
 # 도입 배경/실험(유닛테스트 15/15 PASS 등)은 devnotes FINDINGS.md
 # 179차/179차후속2 항목에 그대로 보존되어 있다(삭제하지 않음, §24).
 
-# [162차, 방향2 - 보수적 완화] carrot_serv.py::_update_gps()가 계산하는
-# position_dt_since_fix(마지막 실제 위치 fix 이후 데드레커닝 경과시간)가
-# 이 값을 넘으면 위치추정을 신뢰할 수 없는 상태로 보고, route_speed
-# 램프리미터가 "완화(속도 상향)" 방향으로는 움직이지 못하게 동결한다.
-# 배경(FINDINGS.md 162차): route aeeed9e4a5 seg3 실측에서 앱/폰 GPS
-# 갱신이 11초간 끊기며 estimate_position() 데드레커닝이 옛 헤딩(296.0°
-# 고정)으로 계속 직진 외삽 -> 실제 급우회전(steer 최대 -121.9°) 중인데
-# curvature 계산이 "직선"으로 오판(위치오차 최대 28m 누적)해 route_speed가
-# 300 쪽으로 완화되며 상승. 이 게이트는 근본원인(헤딩 오차) 자체를 고치는
-# 것(방향1, livePose 자세데이터 보정)이 아니라, 그 오판이 "제약 해제"
-# 방향으로 새는 것만 막는 보수적 완화다 -- 하강(더 낮은 속도로 감속)
-# 방향은 그대로 허용하므로 실제 커브를 늦게라도 정상 감지하면 여전히
-# 반응한다. 이 구간에서도 vturn(비전)이 이미 안전하게 인계받고 있음이
-# 실측으로 확인됨(FINDINGS.md 162차) -- 안전 회귀 위험 없이 route의
-# 잘못된 "완화" 오탐만 억제하는 목적.
-# 3.0s는 carrot_serv.py의 gps_updated_navi/gps_updated_phone 신선도
-# 판정과 동일한 관례값(_update_gps() L713-714)을 그대로 재사용.
-# 사전검증: devnotes toolkit/sim_route_position_uncertainty_gate.py(162차).
-#
-# [167차, 병행조건 좁힘] 166차 헤딩보정(방향1, CC.orientationNED 델타앵커링)이
-# 실차검증 전 단계에서 이 게이트(방향2)와 병행하기로 결정됨(사용자 지시).
-# 다만 방향1이 정상 동작 중(cc_pose_valid=True)이면 방향1 자체가 이 문제를
-# 이미 해결하므로 방향2까지 겹쳐 켜두면 완화(상승) 방향이 불필요하게
-# 과도 억제됨(트레이드오프 논의 FINDINGS.md 167차 참고) -- 따라서 실제
-# 적용부(아래 사용처)에서는 cc_pose_valid=False(방향1이 무력화되는 폴백,
-# 예: 캘리브레이션 미완료)일 때만 이 게이트가 발동하도록 조건을 좁혔다.
-ROUTE_POSITION_UNCERTAIN_DT_S = 3.0
+# [223차, 전면 재설계 -- 삭제] 162/167차 GPS 위치불확실 램프완화 게이트
+# (ROUTE_POSITION_UNCERTAIN_DT_S)는 132/173차 프레임간 램프리미터(아래
+# 223차 주석에서 전체 삭제)에서만 쓰이던 상수다. 램프리미터 자체가 새
+# 무상태 감속식(§15/§17)으로 완전히 대체되며 이 게이트도 함께 불필요해져
+# 삭제한다. GPS 위치 유효성 검사 자체(cc_pose_valid, position_dt_since_fix
+# 계산)는 carrot_serv.py에 그대로 남아있고 cereal로도 계속 발행된다 --
+# 이번에 삭제하는 것은 "그 값을 route 램프리미터 완화방향 게이트로 쓰던
+# 소비처"뿐이다(design doc §16, ryu-devnotes/design/223cha_design_instructions.md).
+# 과거 배경/실측 근거는 devnotes FINDINGS.md 162차/167차에 보존됨(§24).
 
-# [199차, 설계 A v2->v3] vEgo 기반 동적 감속(설계 A) 재검토 배경.
-#
-# 198차에서 확인된 사실(devnotes FINDINGS.md/WIP.md 198차 참고, 이하 요약):
-# calculate_current_speed()의 raw out_speed는 항상 197차 그대로 유지하고,
-# 132/173차 프레임간 램프리미터의 "하강 상한(accel_limit_kmh)"만 그 순간
-# 실제로 필요한 감속도(required_decel, vEgo 기반)로 동적 부스트하면(v2),
-# "이미 램프가 걸린 채 더 급한 2차 apex로 갱신"되는 뒤늦은 발견 상황에서
-# 오버슈트를 줄일 수 있다(149/150차가 시도해 NEGATIVE였던 "out_speed
-# 자체를 올린다" 방향과는 반대로, out_speed는 그대로 두고 램프만 따라잡게
-# 하는 조합이라 목표를 완화하는 부작용이 구조적으로 불가능함).
-#
-# 그러나 198차 v2는 "연속되는 굽이길(winding road)에서 apex_dist가 거의
-# 항상 정확히 distance_interval(=10m, lookahead 상대배열의 첫 샘플)로
-# 구조적으로 고정된다"는 FAIL2를 남겼다 -- candidates[0](위 179/196차,
-# "road_limit 미만인 가장 가까운 지점") 선택 방식 자체가 원인이라, 이
-# apex_dist 값만으로는 "뒤늦게 발견된 진짜 급커브"와 "정상 주행 중 매
-# 프레임 갱신되는 다음 곡률 샘플"을 구분할 수 없다(devnotes toolkit/
-# sim_route_vego_required_decel_v2.py 실측: winding road 600m 전체에서
-# apex_dist 값의 집합이 {10.0} 하나뿐이었음).
-#
-# [199차, 부분 해결] apex_dist 대신 **apex_speed의 프레임간 낙차**를
-# 구분 기준으로 쓴다. 연속 굽이길은 곡률이 서서히 바뀌므로 apex_speed도
-# 프레임당(20Hz) 완만하게만(devnotes 실측 최대 ~2.6km/h, 0.5m 간격
-# fine sweep 기준으로도 ~1.4km/h) 변한다. 반면 "뒤늦게 발견된 급커브"는
-# 정의상 apex_speed가 한 프레임 만에 큰 폭(수십 km/h)으로 떨어진다.
-# 이 낙차가 아래 임계값을 넘는 프레임에서만 "무장(armed)"하여 부스트를
-# 켜고, 그 이후에도 apex_speed가 무장 당시 값 근방을 유지하는 동안만
-# 부스트를 유지한다(같은 급커브를 계속 추적 중이라는 뜻). 일반 굽이길
-# 처럼 apex_speed가 계속 완만하게만 바뀌면 이 게이트가 한 번도 무장되지
-# 않아 기존(197차) 동작과 완전히 동일(diff-0)하다.
-#
-# 안전마진: 실측 최대 완만변화(~2.6km/h)의 약 6배.
-# 사전검증: devnotes toolkit/sim_route_vego_required_decel_v3.py(199차)
-# -- 156차 winding road 전체 궤적 diff-0(불연속 게이트 한 번도 무장 안
-# 됨) + 급커브 인위 주입 시 해당 프레임에서 즉시 무장 감지 + 기존 v2의
-# "이미 램프 걸린 상태에서 더 급한 2차 apex" 오버슈트 감소 효과 유지,
-# 총 9/9 PASS.
-#
-# [부분 해결인 이유, 반드시 기록] apex_speed가 "한 프레임에 크게"
-# 떨어지는 불연속만 잡는다. 만약 실제 도로에서 급커브가 여러 프레임에
-# 걸쳐 이 임계값 미만씩 점진적으로(계단식이 아니라 매 프레임 조금씩)
-# 나타나는 경우 -- 누적으로는 크지만 프레임당 낙차는 항상 임계값
-# 미만인 경우 -- 이 게이트는 뚫리지 않고 여전히 197차와 동일하게(부스트
-# 없이) 동작한다. apex 절대위치를 프레임 간 추적하는 완전한 재설계
-# (158/159차가 시도했다 실측 악화로 폐기된 전례가 있는 방향, FINDINGS.md
-# 159차/195차/198차 참고) 없이는 원천적으로 닫을 수 없는 구멍이며,
-# 이번 v3는 "한 프레임 급락형" 불연속만 부분적으로 해결한다.
-#
-# **실차 검증: 미실시** -- 시뮬레이션/유닛테스트만 완료된 상태.
-ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH = 15.0
-# [199차] vEgo 기반 required_decel 부스트가 올라갈 수 있는 상한. 149/150차
-# (NEGATIVE) 당시 근사값으로 vturn_decel_rate(1.2)를 재사용했던 것과 달리,
-# 이번엔 out_speed 자체를 건드리지 않는 구조(v2/v3 공통 불변식)이므로 더
-# 넉넉한 상한을 둬도 149/150차식 "목표 완화" 부작용이 재현되지 않는다.
-# devnotes toolkit 시뮬레이션(198/199차)에서 쓰인 값(MAXD=3.0)과 동일하게
-# 맞춤 -- 일반적인 편안한 감속(0.7~1.2대)보다는 높지만 비상제동 수준은
-# 아닌 보수적 상한.
-ROUTE_VEGO_BOOST_MAX_MSS = 3.0
-# [202차, 사용자+ChatGPT("지선생") 합의] route apex out_speed 상한을 기존
-# sentinel 값(300.0)에서 실주행 상한 150.0km/h로 명시적으로 분리.
-# [205차] 위 150 고정 클리핑은 vEgo(현재속도) 기반 동적 상한으로 교체됨
-# (아래 carrot_navi_route() 내 "out_speed = min(out_speed, max(v_ego_kph,
-# apex_speed))" 참고, 이유는 그 지점 주석). 이 상수 자체는 폐기하지 않고
-# 그 동적 상한 위에 얹는 절대 안전상한(secondary ceiling)으로 유지 --
-# 정상 주행에서는 vEgo가 이 값을 넘지 않으므로(실차 계측 최대 117~122km/h,
-# WIP.md real-drive calibration 참고) 사실상 발동하지 않지만, vEgo 센서
-# 이상값 등 예상 밖 입력에 대한 방어선으로 남겨둔다. route가 아예
-# 비활성/미계산 상태임을 나타내는 "제약 없음" sentinel(_route_out_speed
-# 초기값 300.0, carrot_serv.route_out_speed 초기값 300.0)은 의미가 다르므로
-# 그대로 300.0 유지(150으로 낮추면 route 비활성 구간에서도 마치 150km/h
-# 제약이 걸린 것처럼 arbitration에 잘못 참여할 위험). 적용 순서는 이
-# 클리핑 이후 carrot_serv.update_navi()에서 MapTurnSpeedFactor(기본
-# 1.30)가 곱해지므로(carrot_serv.py `route_speed = max(route_speed *
-# self.mapTurnSpeedFactor, ...)`), 최종 arbitration 입력값 상한은
-# 150 * mapTurnSpeedFactor(예: 1.30 기준 195km/h)가 될 수 있음 -- 실사용상
-# 문제 없다고 판단(어차피 vturn/road_limit 등 다른 후보가 그보다 낮게
-# 형성되는 것이 일반적).
+# [223차, 전면 재설계 -- 삭제] 199차 apex_speed 불연속 감지 부스트
+# (ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH, ROUTE_VEGO_BOOST_MAX_MSS)는
+# 132/173차 램프리미터의 "하강 상한을 동적으로 따라잡는" 보정이었다.
+# 새 감속식(§7/§8, 아래 carrot_navi_route() 참고)은 매 프레임 vEgo 실측과
+# apex까지 남은 거리로 필요 감속도를 직접 역산하므로 램프리미터 자체가
+# 없어져 이 보정도 구조적으로 불필요해진다(design doc §14). 과거 배경/
+# 실측 근거는 devnotes FINDINGS.md 198차/199차에 보존됨(§24).
+
+# [223차, 전면 재설계 -- 삭제] 205~221차에 걸쳐 누적된 route ceiling 계열
+# (vEgo ceiling, sharpest_candidate_speed ceiling, 150km/h 고정 ceiling,
+# 3항 min() ceiling)을 전부 삭제한다. 이 계열은 "허용 가능한 최대속도를
+# 얼마나 관대하게 풀어줄지" 사후보정하는 구조였는데, 근본 원인(§8 -- 기존
+# calculate_current_speed 물리식이 vEgo를 입력받지 않아 decel_rate 증가
+# 시 오히려 허용속도가 올라가는 역방향 민감도)을 고치지 않고 매 세션
+# 새 ceiling 항을 덧대는 방식이었다(design doc §13/§22, "보정식 계속
+# 추가 금지"). 새 감속식은 "vEgo에서 한 스텝만 깎는" 구조라 out_speed
+# <= vEgo가 수식 자체로 항상 보장되어(증명: design/223cha_step2_decel_formula.md
+# §2.3) ceiling이 원천적으로 불필요해진다. ROUTE_MAX_SPEED_KPH(150) 상수
+# 자체는 "route 비활성/미계산" 상태를 나타내는 **텔레메트리 전용 sentinel**
+# 로만 남긴다 -- 실제 제어입력(carrot_navi_route() 반환값)은 비활성 시
+# None을 반환해 arbitration(carrot_serv.py update_navi())의 min() 후보에서
+# 애초에 제외되므로, 150이 다른 소스보다 항상 큰지 신경 쓸 필요가 없어진다
+# (STEP3 결론, design/223cha_step3_arbitration.md §4). 과거 205~221차
+# ceiling 계열의 배경/실측 근거는 devnotes FINDINGS.md/WIP.md 해당 회차에
+# 보존됨(§24, 삭제하지 않음).
 ROUTE_MAX_SPEED_KPH = 150.0
+
+# [223차, 신규] Route ACTIVE 상태에서 apex(감속목표지점)까지 남은 거리가
+# 이 값 이하로 줄어들면 "도달"로 간주해 즉시 RELEASE한다(design doc §10).
+# distance_interval(=10.0, 아래 carrot_navi_route() 내 리샘플 간격)과 동일
+# 값 -- 리샘플 그리드 특성상 이보다 촘촘하게 판정할 수 없고, 이 값 미만은
+# 사실상 apex 지점 그 자체로 봐도 무방하다(그리드 해상도 한계).
+ROUTE_APEX_REACHED_DIST_M = 10.0
+
+# [223차, 신규] Route RELEASE 이후 완전 OFF를 유지하는 시간(design doc
+# §11/§12) -- curve A apex 직후 curve B가 즉시 감지되어 route가 바로
+# 재부착되는 현상을 막기 위한 목적. 사용자 설계문서 지시값 그대로(2초).
+ROUTE_RELEASE_HOLD_S = 2.0
 
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
@@ -504,19 +446,15 @@ class CarrotMan:
     self._navi_route_source = ""
     self._navi_active_last_ts = None
     self._dt_route_inactive = 0.0
-    # [132차] Hypothesis C(131차) 대응: carrot_navi_route()의 route_lookahead
-    # 윈도우 경계로 급커브가 이산적으로 진입하며 out_speed가 단일 20Hz
-    # 프레임에 급락(최대 Δ-25kph 실측)하는 현상을 완화하기 위한 프레임간
-    # 램프 리미터 상태값. None이면 리미터 미적용(최초 활성화/직후 상태).
-    self._route_speed_prev = None
-    # [199차, 설계 A v3] apex_speed 불연속 감지 게이트 상태(위
-    # ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH 주석 참고). prev는 직전
-    # 프레임 apex_speed(불연속 판정 기준), armed는 이번 프레임 vEgo 기반
-    # 부스트 무장 여부, armed_speed는 무장 당시의 apex_speed(같은 급커브를
-    # 계속 추적 중인지 판정하는 기준값).
-    self._route_apex_speed_prev = None
-    self._route_apex_boost_armed = False
-    self._route_apex_boost_armed_speed = None
+    # [223차, 전면 재설계] 132차 프레임간 램프리미터(_route_speed_prev)와
+    # 199차 불연속 부스트 상태(_route_apex_speed_prev/boost_armed*)는 새
+    # 무상태 감속식으로 대체되며 삭제됨(위 상수 정의부 주석 참고). 대신
+    # design doc §17이 요구하는 최소 상태만 유지한다 -- route_active(현재
+    # 실제로 감속 수행 중인가, Parameter의 route_enabled와는 별개 개념,
+    # §2)와 route_release_time(apex 도달 직후 RELEASE된 monotonic 시각,
+    # None이면 hold 중이 아님, §11).
+    self.route_active = False
+    self.route_release_time = None
 
     self.active_carrot_last = False
 
@@ -684,6 +622,30 @@ class CarrotMan:
     self.carrot_serv.route_candidate2_dist = 0.0
     self.carrot_serv.route_candidate2_speed = 0.0
 
+    # [223차, 신규 -- design doc §0/§3] route_enabled = Parameter에 Route가
+    # 포함되어 있는가(mode 2/3). Mode 0/1이면 curve search/apex 선택/감속
+    # 계산/상태기계 자체를 이번 프레임에 전혀 실행하지 않는다(STEP1 A항이
+    # 지적한 "mode를 전혀 참조하지 않던" 문제 해결). route_active와는
+    # 별개 개념(§2) -- route_enabled=True여도 직선이면 route_active=False일
+    # 수 있다.
+    route_enabled = self.carrot_serv.turnSpeedControlMode in [2, 3]
+    if not route_enabled:
+      # [223차, design doc §18] mode 2/3 -> 0/1 전환 시 즉시 전체 상태 초기화.
+      # 매 호출마다 무조건 리셋하므로 mode가 0/1로 머무는 동안은 계속 초기
+      # 상태 유지, 0/1 -> 2/3 재전환 시에도 잔여 상태 없이 새로 검색 시작(§18).
+      self.route_active = False
+      self.route_release_time = None
+      return [], [], None
+
+    # [223차, design doc §11/§12] apex RELEASE 직후 2초간 완전 OFF -- 새
+    # curve 검색/apex 선정/target 생성/감속을 전혀 수행하지 않는다. hold가
+    # 끝나면(route_release_time=None) 아래로 진행해 nearest curve를 새로
+    # 검색한다(이전 curve를 이어서 추적하지 않음, §12).
+    if self.route_release_time is not None:
+      if (time.monotonic() - self.route_release_time) < ROUTE_RELEASE_HOLD_S:
+        return [], [], None
+      self.route_release_time = None
+
     # [99차/100차, 죽은 코드 정리] 여기 있던 `if self.carrot_serv.active_carrot > 1:
     # if False and self.navd_active:` 블록은 항상 거짓이라 실행된 적이 없는
     # 죽은 분기 -- 제거 (동작 변화 없음).
@@ -701,21 +663,27 @@ class CarrotMan:
           #self.params.remove("NavDestination")
           pass
       self.active_carrot_last = self.carrot_serv.active_carrot
-      # [132차] route 비활성화 -- 다음 활성화 시 리미터가 과거 값을 끌고
-      # 오지 않도록 리셋(제약 해제 방향은 항상 즉시 반영되어야 안전).
-      self._route_speed_prev = None
-      # [199차] 불연속 감지 게이트도 함께 리셋 -- route가 다시 활성화될
-      # 때 직전(비활성 이전) apex_speed와 비교해 오탐하지 않도록 한다.
-      self._route_apex_speed_prev = None
-      self._route_apex_boost_armed = False
-      self._route_apex_boost_armed_speed = None
-      return [],[],ROUTE_MAX_SPEED_KPH  # [211차] 300 -> 150, 위 self._route_out_speed와 동일 이유
+      # [223차] route 비활성화(navi 미가용 등) -- ACTIVE 상태였다면 즉시 해제.
+      # hold 타이머는 걸지 않는다(§11의 목적은 "apex 직후 다음 curve 즉시
+      # 재부착 방지"이지, navi 자체가 끊긴 경우까지 인위적으로 지연시킬
+      # 이유가 없음 -- 제약 해제는 항상 즉시 반영이 안전하다는 132차 원칙 계승).
+      self.route_active = False
+      return [], [], None
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
     heading_deg = self.carrot_serv.bearing
 
     distance_interval = 10.0
-    out_speed = ROUTE_MAX_SPEED_KPH  # [211차] 300 -> 150, 위 self._route_out_speed와 동일 이유(경로는 활성이나 lookahead 내 유효 포인트가 부족해 이 기본값이 그대로 반환되는 경우 포함)
+    # [223차, 버그 수정] 이 초기값은 아래 "if len(resampled_points) >=
+    # sample*2+1:" 조건이 거짓이라 curve 계산 블록 자체가 실행되지 않는
+    # 경우(path는 있으나 리샘플 포인트가 곡률 계산에 부족) 그대로 반환값이
+    # 된다. 구 코드는 여기 ROUTE_MAX_SPEED_KPH(150, 텔레메트리 sentinel과
+    # 동일값)를 뒀는데, 당시엔 150이 항상 다른 arbitration 후보보다 커서
+    # 무해했다(150 ceiling 시절). 이제 제어입력은 "제약 없음"을 None으로
+    # 표현하므로(위 §3/§4 주석 참고), 여기서도 반드시 None이어야 한다 --
+    # 150을 그대로 두면 이 경로에서만 잘못된 유한값이 arbitration의
+    # min() 후보에 들어가 버린다.
+    out_speed = None
     # [217차] 84/85차 동적 캡(300~600m) 원복 -- 위 주석 참고, 300m 고정.
     # [221차, 사용자 설계문서 "Route 감속 다음 설계 방향(2026-09 개정)" 2번 --
     # 300m -> 600m 고정 확장, 84/85차와는 별개 재도입] **주의 -- 217차가
@@ -871,22 +839,10 @@ class CarrotMan:
             # 참고. 실차 검증 필수(196차 실차 검증: 미실시).
             road_limit_speed = self.carrot_serv.nRoadLimitSpeed
             candidates = [k for k in range(len(speeds)) if speeds[k] < road_limit_speed]
-            if not candidates:
-                apex_idx = min(range(len(speeds)), key=lambda k: speeds[k])  # 폴백: 감속필요구간 없음(직선)
-            else:
-                apex_idx = candidates[0]
-            apex_dist = distances[apex_idx]
-            apex_speed = speeds[apex_idx]
-
-            # [204차 계측, 203차 옵션1] apex로 선택되기 직전의 candidates
-            # 리스트(road_limit_speed 미만, 거리 오름차순) 그 자체를 관측용으로
-            # 보존한다. apex_idx/apex_speed 단일값만으로는 "허위 직선 스파이크
-            # (먼 후보로 순간 전환)"와 "정상적인 연속곡선/커브탈출가속 중 후보
-            # 전환"을 구분할 수 없다는 것이 203차 시뮬레이션(WIP.md 203차)의
-            # 결론 -- 이 값들로 실차 로그에서 candidates[]의 실제 구성(가까운
-            # 진짜 후보가 밀리는지 vs 후보 자체가 멀리만 있는지)을 직접 확인한다.
-            # candidates가 비어 179차 폴백(전역 최소)을 탄 경우는
-            # routeCandidateCount=0으로 노출하고 candidate0~2는 (-1,0,0) 유지.
+            # [223차, design doc §5] 여러 후보 중 가장 가까운 유효 curve 1개만
+            # 선택 -- 기존 candidates[0] 방식(179/196차) 그대로 재사용
+            # (STEP1 KEEP 확정). 감속 필요 지점이 하나도 없으면(전부 직선)
+            # route는 개입하지 않는다.
             self._route_candidate_count = len(candidates)
             self._route_candidate0 = (-1, 0.0, 0.0)
             self._route_candidate1 = (-1, 0.0, 0.0)
@@ -900,32 +856,6 @@ class CarrotMan:
             if len(candidates) >= 3:
                 c_idx = candidates[2]
                 self._route_candidate2 = (c_idx, distances[c_idx], speeds[c_idx])
-
-            out_speed = self.carrot_serv.calculate_current_speed(
-                apex_dist,
-                apex_speed,
-                self.carrot_serv.autoNaviSpeedCtrlEnd,    # safe_time -- 카메라와 동일 파라미터 재사용
-                self.carrot_serv.autoNaviSpeedDecelRate,  # safe_decel_rate -- 카메라와 동일 파라미터 재사용
-            )
-            # [193차] route apex 실차/replay 진단 telemetry.
-            # 주행 계산값은 변경하지 않고, 선택된 apex와 최종 route 출력만 보존한다.
-            self._route_apex_idx = apex_idx
-            self._route_apex_dist = apex_dist
-            self._route_apex_speed = apex_speed
-            self._route_out_speed = out_speed
-            # [194차] 193차는 이 값을 CarrotMan(self) 내부에만 저장해서
-            # cereal(msg.carrotMan)까지 전달되지 않았음(FINDINGS.md 193차).
-            # CarrotServ가 실제 cereal 발행부를 갖고 있고 self.carrot_serv는
-            # CarrotServ 인스턴스이므로, 계산 직후 CarrotServ 쪽 저장소에도
-            # 같은 값을 써서 carrot_serv.py의 update_navi()가 msg에 담을 수
-            # 있게 한다. 주행 계산 로직(out_speed 등)은 변경하지 않는다.
-            self.carrot_serv.route_apex_idx = apex_idx
-            self.carrot_serv.route_apex_dist = apex_dist
-            self.carrot_serv.route_apex_speed = apex_speed
-            self.carrot_serv.route_out_speed = out_speed
-            # [204차 계측] candidate telemetry도 apex와 동일하게 CarrotServ
-            # 쪽 저장소에 즉시 반영 -- carrot_serv.py의 update_navi()가
-            # cereal(msg.carrotMan)에 담을 수 있도록 한다(194차와 동일 이유).
             self.carrot_serv.route_candidate_count = self._route_candidate_count
             self.carrot_serv.route_candidate0_idx = self._route_candidate0[0]
             self.carrot_serv.route_candidate0_dist = self._route_candidate0[1]
@@ -936,280 +866,90 @@ class CarrotMan:
             self.carrot_serv.route_candidate2_idx = self._route_candidate2[0]
             self.carrot_serv.route_candidate2_dist = self._route_candidate2[1]
             self.carrot_serv.route_candidate2_speed = self._route_candidate2[2]
-            # [205차, 사용자 지시 -- "감속로직은 최대값 150이 아니라 현재속도(예
-            # 70)에서 목표속도로 내려오는 로직으로"] 202차의 고정 150 상한을
-            # vEgo(현재속도) 기반 동적 상한으로 교체.
-            #
-            # 배경 확인(코드 레벨): calculate_current_speed(left_dist,
-            # safe_speed_kph, safe_time, safe_decel_rate)는 v_ego를 인자로
-            # 받지 않는다 -- 과속카메라(sdi_speed)/route 둘 다 "남은 거리"만으로
-            # 물리공식(v_i^2=v_f^2+2ad)을 풀어 raw 값을 매 프레임 재계산하는
-            # 구조이며, 카메라는 이 raw 값을 250 cap 외 추가 제한 없이 그대로
-            # arbitration에 넣는다(selfdrive/carrot/carrot_serv.py:1050 부근).
-            # 즉 "현재속도에서 시작"하는 로직은 원래 카메라에도 없었다 -- raw가
-            # 멀리서는 크고(최대 250) 가까워지며 sqrt 곡선으로 목표속도에
-            # 수렴하는 것 자체가 "감속처럼 보이는" 효과의 정체.
-            #
-            # 202차가 150을 고정 상한으로 둔 이유는 apex_idx가 먼 후보로
-            # 순간전환될 때(203차가 규명한 "스파이크/고원" 문제, WIP.md 203차
-            # 참고) raw가 최대 298까지 튀는 것을 막기 위함이었는데, 고정값이라
-            # vEgo가 이미 낮은 저속 주행 중에도 150까지는 그대로 허용되는
-            # 근본적 한계가 있었다. 상한을 "max(vEgo_kph, apex_speed)"로
-            # 바꾸면: (1) route는 현재 주행 속도보다 더 빠르게 가라고 절대
-            # 권하지 않는다(사전감속 신호라는 route의 목적과 부합, "가속
-            # 신호"가 될 이유가 없음), (2) apex_speed(물리적으로 요구되는
-            # 최종 목표속도) 밑으로는 절대 깎이지 않는다(calculate_current_speed
-            # 자신의 반환 하한과 동일한 하한을 유지 -- max()로 보장),
-            # (3) apex_idx 오선택으로 raw가 298까지 튀어도, vEgo가 예를 들어
-            # 55km/h면 상한이 max(55, apex_speed)로 즉시 눌려 202차가 막으려던
-            # 스파이크의 근본 원인을 고정값(150)보다 더 직접적으로 차단한다.
-            # [207차, 206차 NEGATIVE 원인 대응] 206차가 199cha 8세그
-            # 실차로그로 205차를 재검증한 결과, apex_idx가 "road_limit
-            # 바로 아래인 사실상 무해한 근접 후보"(예: 297.5kph)를 가리키는
-            # 동안(t=418.42~423.18, 4.6초/92프레임 지속되는 "고원")에는
-            # apex_speed 자체도 함께 297~298 근방으로 오염되어, 바로 위
-            # max(v_ego_kph, apex_speed)가 오염된 apex_speed에 지배당해
-            # vEgo 하한이 전혀 작동하지 않았다(would_bind 37.1%->37.1%
-            # 불변, 완전 NEGATIVE 재확인). 그런데 이 "고원" 구간에서도
-            # 같은 lookahead 윈도우 안에는 이미 실제 북대전IC 급커브(더
-            # 멀리, 예: 230m/50kph)가 candidates 리스트 자체에는 들어있다
-            # (apex_idx가 "가장 가까운 후보"(196/197차 설계)라서 아직 그
-            # 지점을 가리키지 않을 뿐, 후보 존재 자체는 이미 계산돼있다 --
-            # 바로 위 204차 계측용 candidates 리스트, L839 참고).
-            #
-            # 따라서 "상한(ceiling)" 항에서만 apex_speed 대신 candidates
-            # 전체 중 가장 급한(=speed가 가장 낮은) 후보의 speed를 쓴다.
-            # apex_dist/apex_speed(raw 계산에 실제 쓰이는 값, 196/197차
-            # 1차->2차 순차처리 선택)는 전혀 건드리지 않는다 -- 이 값은
-            # 오직 "vEgo 기반 상한을 얼마나 관대하게 풀어줄지" 판단에만
-            # 쓰이는 별도 항이다. sharpest_candidate_speed는 정의상 항상
-            # apex_speed 이하이므로(apex_speed 자신도 candidates의 원소),
-            # 이 변경은 상한을 더 보수적으로(=더 낮게)만 만들 수 있고
-            # 완화(=상한이 더 높아짐) 방향의 회귀는 구조적으로 불가능하다.
-            # candidates가 비어있으면(완전 직선, 179차 폴백 경로) 기존과
-            # 동일하게 apex_speed로 폴백해 205차와 diff-0가 유지된다.
-            #
-            # 이 변경은 새로운 상태(state)를 추가하지 않는다(무상태, 매
-            # 프레임 candidates에서 즉시 재계산) -- 158/159차가 폐기한
-            # "명시적 3상태 히스테리시스"(stuck-disengaged 2/3, 프레임간
-            # 최대낙차 244km/h, FINDINGS.md 159차)와는 무관하며, 그 실패의
-            # 구조적 원인(상태 리셋으로 route_speed_prev가 300 쪽으로
-            # 즉시통과+점프)이 애초에 발생할 수 없다 -- _route_speed_prev
-            # 램프리미터는 205/206차와 완전히 동일하게 매 프레임 연속으로만
-            # 갱신된다.
-            #
-            # 사전검증(실차로그 없이 시나리오 기반, devnotes
-            # toolkit/sim_route_ceiling_sharpest_candidate_207.py, 6/6 PASS):
-            # 206차가 기록한 수치(apex_dist=70/apex_speed=297.5/vEgo=55,
-            # 같은 윈도우에 sharpest=50 후보 존재)를 재구성한 시나리오에서
-            # OLD(205차) out=150.0 -> NEW(207차) out=55.0으로 vEgo 상한이
-            # 실제로 작동함을 확인. 정상 직선복귀/연속 S자/candidates=[]
-            # 폴백 3개 대조 시나리오는 OLD와 diff-0(회귀 없음) 확인.
-            # **실차 검증: 미실시** -- 199cha 8세그 원본 로그(대용량, §23
-            # 대상)가 컨테이너 리셋으로 소실되어 이번 세션에서는 실측
-            # "실차 vs 실차" 재검증을 하지 못했다(NEEDS_VALIDATION).
-            # [214차, 213차 버그 대응 -- 사용자 확정] 위 207차 ceiling(sharpest_candidate_speed)은
-            # candidate의 speed만 보고 거리를 무시해, 1차 apex 통과 후 2차가 아직 멀리 있어도
-            # ceiling이 계속 낮게 묶여 원복을 막는 버그가 있었다(WIP 213차, "1차->2차 사이
-            # 저속유지"). 사용자 설계 문서(곡선_가감속_코딩.txt) 5번 -- "1차 apex 도달 시 원복,
-            # 2차 apex 목표속도를 바로 계산해 기본곡선 로직 적용(더 급한 쪽 기준)" -- 원칙에 따라,
-            # ceiling도 apex_dist/apex_speed와 동일한 물리공식(calculate_current_speed, 카메라
-            # 감속과 동일)을 candidate마다 재사용하도록 교체. 새 상수/새 상태 없음(§27 최소변경) --
-            # apex_dist/apex_speed(raw 계산에 쓰이는 값, 179/196차 선택 로직)는 전혀 건드리지 않고,
-            # 오직 "상한을 얼마나 관대하게 풀어줄지" 판단하는 이 항에만 거리를 반영한다.
-            # 거리가 멀면 raw가 road_limit 근처로 높게 나와 원복을 허용하고, 감속거리 안으로
-            # 들어오면 자연히 낮아지며 가장 급한 candidate 쪽으로 수렴한다(진동 없음, 단조수렴 --
-            # 214차 시나리오3/3b/4 확인).
-            #
-            # 사전검증(devnotes toolkit/sim_route_ceiling_distance_aware_214.py, 8/8 PASS):
-            # - 시나리오1(207차 회귀 방어, apex=70m/297.5kph trivial, sharpest=230m/50kph,
-            #   vEgo=55): OLD out=55.00 -> NEW out=70.07. NEW가 OLD보다 높은 것은 버그가
-            #   아니라 설계 의도 그 자체(230m 거리를 반영해 "아직 완전감속 불필요"로 판단) --
-            #   사용자가 이 수치를 직접 확인 후 NEW로 확정(214차 판정 완료).
-            # - 시나리오3b(213차 버그 재현): OLD out=40.00(저속유지 버그 재현) vs
-            #   NEW out=75.05(원복 허용, 버그 해소) -- 가장 명확한 개선 확인.
-            # - 나머지(시나리오2/3/4, 대조군1~3): 조기고정 없음, 단조수렴, 205~207차 기존
-            #   시나리오 회귀 없음(대조군3 candidates=[] 폴백은 OLD=NEW 완전 동일, diff-0).
-            # **실차 검증: 미실시** -- 213차 실차 검증(20m 하드플로어)과 함께 이월.
-            sharpest_candidate_speed = min(
-                (self.carrot_serv.calculate_current_speed(
-                    distances[k], speeds[k],
-                    self.carrot_serv.autoNaviSpeedCtrlEnd,
-                    self.carrot_serv.autoNaviSpeedDecelRate,
-                ) for k in candidates),
-                default=apex_speed
-            ) if candidates else apex_speed
-            v_ego_kph = self.sm['carState'].vEgo * 3.6
-            # [217차, 사용자 설계문서 "Route 감속 다음 설계 방향" 2번 -- 상한을
-            # 150 고정 대신 설정속도(vCruise) 기준으로 전환] 기존엔 이 ceiling
-            # 항이 항상 ROUTE_MAX_SPEED_KPH(150) 고정이라, 먼 후속 후보(예:
-            # apex_dist=300m대)의 raw 물리계산값이 150을 넘기면 그대로 150에서
-            # 클램프됐다. 215차 실차로그(t=375.5, vCruise=55 고정 구간에서
-            # liveRouteSpeed가 정확히 150.0에서 클램프된 뒤 172/173차 하강램프
-            # (2.52km/h/s)로 약 30초에 걸쳐 서서히 30kph대까지 내려오는 것을
-            # 실측) -- "150에서 천천히 감속 시작"이라는 사용자 제보의 직접
-            # 원인. 설정속도(vCruise)가 150보다 낮은 게 일반적이므로, ceiling을
-            # min(vCruise, 150)으로 낮추면 스파이크 자체가 vCruise 근방에서
-            # 시작해 램프 하강 구간이 크게 줄어든다(위 예시 기준 150->30
-            # 이었을 구간이 55->30로 단축). vCruise<=0(크루즈 비활성 등
-            # 비정상값)일 때는 기존 150 그대로 폴백해 회귀 없음.
-            #
-            # [221차, 사용자 설계문서 "Route 감속 다음 설계 방향(2026-09 개정)"
-            # 1번 -- ceiling 기준을 vCruise(설정속도) -> vEgo(현재 실제속도)로
-            # 재교체] 217차가 150 고정 -> vCruise 기준으로 낮췄지만, vCruise는
-            # "운전자가 설정한 목표"일 뿐 "차량이 지금 실제로 내고 있는 속도"가
-            # 아니다 -- 예: 설정속도 70, 실제 vEgo 50으로 주행 중(선행차 추종 등)
-            # 이면 217차 기준(vCruise=70)은 route가 "70에서부터 커브목표(40)까지
-            # 감속거리를 계산"하게 만들어, 이미 50으로 달리고 있는 차량 입장에서
-            # 시작점 자체가 실제보다 20km/h 높게 잡히는 오차가 생긴다. 사용자
-            # 지시: "route가 차량보다 높은 속도를 강제로 요구하는 구조가 되면
-            # 안 된다" -- ceiling을 vEgo 기준으로 바꾸면 이 조건이 자동으로
-            # 성립한다(증명: out_speed = min(raw, max(vEgo,sharpest), vEgo) 이고
-            # max(vEgo,sharpest) >= vEgo 이므로 세 번째 항이 항상 지배 ->
-            # out_speed <= vEgo 가 항상 보장됨 -- "vEgo가 route 계산 현재위치
-            # 허용속도보다 낮으면 route는 개입하지 않는다"는 안전조건도 별도
-            # 분기 없이 이 min() 구조 자체로 만족).
-            # 부작용(반드시 인지): 위 max(vEgo, sharpest_candidate_speed) 항은
-            # 이 변경으로 route_ceiling_kph(=vEgo, vEgo<150 정상범위에서) 이하로
-            # 항상 눌리므로 out_speed 결정에 더 이상 영향을 주지 못하는 사실상
-            # 죽은 항이 된다(207/214차가 도입한 "sharpest_candidate_speed로
-            # ceiling을 더 관대하게 풀어주는" 효과가 vEgo 상한 아래에서는 발동할
-            # 수 없음) -- §27 최소변경 원칙에 따라 변수/계산 자체는 삭제하지
-            # 않고 그대로 둔다(향후 vEgo 기준을 되돌릴 경우 diff 최소화,
-            # telemetry 일관성 유지). vEgo<=0(정지/센서 이상 등 비정상값)일
-            # 때는 기존과 동일하게 150 그대로 폴백.
-            # **검증**: devnotes toolkit/sim_route_ceiling_vego_221.py -- 사용자
-            # 설계문서 예시 2건(vCruise=70/vEgo=70/목표=40, vCruise=70/vEgo=50/
-            # 목표=40) 그대로 재현 + vEgo<목표(무개입) 시나리오 포함, 합성
-            # 시나리오만 수행(PASS). 218차가 디바이스에 이미 적용한
-            # AutoNaviSpeedDecelRate=1.00 m/s² 기준으로 검증(사용자 설계문서
-            # 4번). **실차 검증: 미실시**.
-            route_ceiling_kph = min(v_ego_kph, ROUTE_MAX_SPEED_KPH) if v_ego_kph > 0 else ROUTE_MAX_SPEED_KPH
-            out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), route_ceiling_kph)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체 / [217차] 150 고정 -> min(vCruise,150) / [221차] vCruise -> vEgo 기준으로 재교체
-            # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
-            # 그대로 사용.
-            base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
-            accel_limit_kmh = base_accel_limit_kmh
 
-            # [199차, 설계 A v3 -- 위 ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH
-            # 주석 참고] raw out_speed(위 out_speed)는 절대 건드리지 않는다
-            # (197차와 100% 동일 -- 이 블록 전체는 아래 132차 램프리미터의
-            # 하강 상한(accel_limit_kmh)에만 영향을 준다).
-            #
-            # 1) 불연속 감지: 직전 프레임 대비 apex_speed가 임계값 이상
-            #    떨어졌으면 새로 무장, 이미 무장된 상태면 apex_speed가
-            #    무장 당시 값 근방을 유지하는 동안 계속 무장 유지.
-            if self._route_apex_speed_prev is None:
-                # 최초 관측 -- 불연속 여부 판단 불가, 무장하지 않음(197차와
-                # diff-0가 기본값). 무장 안 된 다음 프레임부터 정상적으로
-                # 델타 비교가 시작된다(0.05s 지연, 무시 가능).
-                pass
+            if not candidates:
+                # [223차] 직선 -- 감속 필요 지점 없음. ACTIVE 중이었다면
+                # (예: 후보가 사라짐 == 사실상 통과) 즉시 RELEASE+hold 시작.
+                if self.route_active:
+                    self.route_active = False
+                    self.route_release_time = time.monotonic()
+                out_speed = None
             else:
-                apex_delta_kph = self._route_apex_speed_prev - apex_speed  # 양수=더 급해짐
-                if apex_delta_kph > ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH:
-                    self._route_apex_boost_armed = True
-                    self._route_apex_boost_armed_speed = apex_speed
-                elif self._route_apex_boost_armed:
-                    if abs(apex_speed - self._route_apex_boost_armed_speed) > ROUTE_APEX_SPEED_DISCONTINUITY_THRESH_KPH:
-                        self._route_apex_boost_armed = False
-                        self._route_apex_boost_armed_speed = None
-            self._route_apex_speed_prev = apex_speed
+                apex_idx = candidates[0]
+                apex_dist = distances[apex_idx]
+                apex_speed = speeds[apex_idx]
+                self._route_apex_idx = apex_idx
+                self._route_apex_dist = apex_dist
+                self._route_apex_speed = apex_speed
+                self.carrot_serv.route_apex_idx = apex_idx
+                self.carrot_serv.route_apex_dist = apex_dist
+                self.carrot_serv.route_apex_speed = apex_speed
 
-            # 2) 무장된 프레임에서만 vEgo 기반 필요감속도로 하강 상한을
-            #    동적 부스트(target 자체는 건드리지 않으므로 149/150차식
-            #    "목표 완화" 부작용이 구조적으로 불가능).
-            if self._route_apex_boost_armed and apex_dist > 0:
                 v_ego_ms = self.sm['carState'].vEgo
-                v_target_ms = apex_speed / 3.6
-                if v_ego_ms > v_target_ms:
-                    required_decel_mss = (v_ego_ms ** 2 - v_target_ms ** 2) / (2.0 * apex_dist)
-                    if required_decel_mss > self.carrot_serv.autoNaviSpeedDecelRate:
-                        boosted_mss = min(required_decel_mss, ROUTE_VEGO_BOOST_MAX_MSS)
-                        accel_limit_kmh = boosted_mss * 3.6
+                v_ego_kph = v_ego_ms * 3.6
 
-            # [132차, Hypothesis C(131차) 대응] route_lookahead_m 윈도우
-            # 경계로 급커브 지점이 이산적으로 curvature 배열에 "출현"하는
-            # 순간, 위 역방향 DP가 그 프레임에 즉시 전체를 재계산해
-            # out_speeds[0](=out_speed)까지 낮은 값이 단일 20Hz 프레임에
-            # 전파될 수 있음(129차 실측 Δ-24~-25kph 단일프레임 급락,
-            # 131차 합성검증 SUCCESS로 메커니즘 확인). 이 자체가 새로운
-            # 제약을 추가하는 게 아니라 -- route_lookahead_m이 애초에
-            # "이 accel_limit_kmh로 감속하기에 충분한 거리"를 목표로
-            # 산정되므로(84차/85차), 경계 스냅이 없었다면 매 프레임 이미
-            # 성립했어야 할 불변식(프레임당 변화 <= accel_limit_kmh*dt)을
-            # 최종 출력에서 강제로 복원하는 것에 가깝다.
-            # 사전검증: devnotes toolkit/sim_route_boundary_ramp_limiter.py
-            # (132차) -- curve_R 10~25m/accel 0.70~1.2 조합에서 정상주행
-            # 구간 최대 프레임당 낙차가 이론 상한(accel_limit_kmh*dt)
-            # 이내로 억제됨을 확인(PASS).
-            #
-            # [172차/173차, 원인A 수정 -- 대칭 -> 비대칭 램프로 변경]
-            # 132차 도입 당시(91차 backward-DP, apex 개념 없음)엔 "회전
-            # 종료 즉시 원복" 계단(129/131차)까지 함께 완화하려고 증가
-            # (원복) 방향에도 동일 램프를 대칭 적용했었다(원 커밋 주석에
-            # 명시). 그러나 157/160차가 아키텍처를 카메라식 apex 거리공식
-            # (calculate_current_speed 재사용)으로 전면 교체하면서 "apex
-            # 통과 시 즉시 원복"을 설계 의도로 못박았고(160차 커밋
-            # 메시지), 실제로 카메라감속(sdi_speed)/회전감속(atc_desired)도
-            # 이 램프 없이 즉시 원복한다. 즉 132차의 증가측 램프는 160차
-            # 이후로는 더 이상 필요한 완화가 아니라, 오히려 160차가
-            # 의도한 즉시 원복을 무력화하는 부작용이 됐다(172차 실측:
-            # apex 통과 후 desiredSpeed 30->48이 accel_limit_kmh 그대로
-            # 5.5초에 걸쳐 서서히 상승 -- 사용자 제보 "우회전 통과 후
-            # route 속도가 서서히 상승"과 정합).
-            # 하강(lo) 방향은 129차/131차가 해결하려던 문제(경계 스냅으로
-            # 인한 단일프레임 급락)가 아키텍처가 바뀐 지금도 여전히
-            # 발생 가능하므로 그대로 유지 -- 감속 스케줄 보호 목적은
-            # 살아있다.
-            # 사전검증: devnotes toolkit/sim_route_boundary_ramp_limiter.py
-            # (173차, RampLimiterState(asymmetric_up=True) 추가) -- 정상
-            # 주행 중 하강측 낙차 억제는 그대로 유지, 상승측은 raw
-            # out_speed를 즉시 추종(지연 없음)함을 확인.
-            if self._route_speed_prev is not None:
-              max_step_kmh = accel_limit_kmh * ROUTE_SPEED_LOOP_DT
-              lo = self._route_speed_prev - max_step_kmh
-              # [173차] 증가(원복) 방향은 기본적으로 무제한 -- 160차 설계
-              # 의도(즉시 원복)를 그대로 따른다.
-              hi = math.inf
-              # [162차] 위치추정이 불확실한 구간(데드레커닝이 실제 GPS/앱
-              # 위치갱신 없이 오래 지속)에서는 상승(완화) 쪽 상한을 이전
-              # 값으로 고정 -- curvature 오판으로 인한 "가짜 직선" 판정이
-              # route_speed를 300 쪽으로 밀어올리지 못하게 막는다. 하강
-              # 쪽(lo)은 그대로 둬 실제 감속 필요는 계속 반영한다.
-              # [167차] 166차 헤딩보정(방향1)이 CC.orientationNED로 이미
-              # 이 상황을 커버하므로, 방향1이 무력화되는 폴백 구간
-              # (cc_pose_valid=False -- 캘리브레이션 미완료 등)에서만
-              # 이 게이트(방향2)가 안전망으로 발동하도록 조건을 좁힘.
-              # 방향1이 정상 동작 중(cc_pose_valid=True)이면 방향2는
-              # 물러나 route가 정확해진 curvature를 그대로 따라가게 둔다.
-              # [173차] 이 게이트는 132차 대칭램프 시절과 동일하게 그대로
-              # 유지 -- 위치불확실 상황에서만 예외적으로 상승측도 다시
-              # prev로 고정(안전망), 정상 상황에서만 위 무제한(hi=inf)이
-              # 적용된다.
-              if (self.carrot_serv.position_dt_since_fix > ROUTE_POSITION_UNCERTAIN_DT_S
-                  and not self.carrot_serv.cc_pose_valid):
-                hi = self._route_speed_prev
-              out_speed = min(max(out_speed, lo), hi)
-            self._route_speed_prev = out_speed
+                if self.route_active and apex_dist <= ROUTE_APEX_REACHED_DIST_M:
+                    # [223차, design doc §10] apex 도달 -- 즉시 RELEASE, 2초 hold 시작.
+                    self.route_active = False
+                    self.route_release_time = time.monotonic()
+                    out_speed = None
+                elif not self.route_active and v_ego_kph <= apex_speed:
+                    # [223차, design doc §6/§9] ACTIVE 진입 게이트 -- 현재
+                    # 속도가 이미 curve target 이하면 route는 개입하지
+                    # 않는다(가속 명령 절대 생성 금지, 45->50으로 올리지 않음).
+                    # hold를 걸지 않는다 -- 애초에 ACTIVE였던 적이 없으므로
+                    # §11(재부착 방지)의 대상이 아니다.
+                    out_speed = None
+                else:
+                    # [223차, design doc §7/§8, STEP2 신규 감속식] ACTIVE
+                    # 진입 또는 계속 추적. 매 프레임 실측 vEgo와 apex까지
+                    # 남은 거리만으로 "지금부터 등감속하면 apex에서 정확히
+                    # target에 도달하는 데 필요한 감속도"를 역산하고,
+                    # autoNaviSpeedDecelRate(comfort cap)로 상한을 씌운 뒤
+                    # 이번 프레임 한 스텝만 vEgo에서 차감한다. 이전 프레임
+                    # 출력에 의존하는 상태가 전혀 없다(design/
+                    # 223cha_step2_decel_formula.md 참고, out_speed<=vEgo가
+                    # 수식 구조 자체로 항상 보장됨을 증명 완료).
+                    self.route_active = True
+                    target_ms = apex_speed / 3.6
+                    eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
+                    if v_ego_ms <= target_ms or eff_dist <= 0:
+                        required_decel_mss = 0.0
+                    else:
+                        required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
+                    applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
+                    out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
+                    out_speed = out_speed_ms * 3.6
+
+            # [223차] out_speed(제어입력)가 실제 계산됐을 때만 텔레메트리를
+            # 그 값으로 갱신 -- None(비활성/개입없음)이면 함수 진입부에서
+            # 이미 초기화한 ROUTE_MAX_SPEED_KPH(150) sentinel을 그대로 둔다
+            # (STEP3 결론 -- 로깅 sentinel과 제어입력을 명확히 분리, 제어
+            # 입력만 None으로 arbitration에서 원천 제외).
+            if out_speed is not None:
+                self._route_out_speed = out_speed
+                self.carrot_serv.route_out_speed = out_speed
+        elif self.route_active:
+            # [223차] 리샘플 포인트가 곡률 계산에 부족(path는 있으나 짧음)
+            # -- 위 out_speed=None 초기값 수정과 동일 이유로, ACTIVE 중이었다면
+            # 즉시 해제한다(hold 없이 -- 실제 곡선 이탈이 아니라 데이터 부족
+            # 사유이므로 132차 "제약 해제는 즉시" 원칙 계승).
+            self.route_active = False
     else:
         resampled_points = []
         resampled_distances = []
         curvatures = []
         speeds = []
         distances = []
-        # [132차] "제약 없음"(윈도우 내 유효 포인트 부족) 상태로 전환 --
-        # 이 방향은 허용속도가 올라가는 안전한 방향(제약 해제)이므로
-        # 리미터를 즉시 리셋해 다음 번 실제 제약이 나타날 때 정상적으로
-        # 다시 램프가 걸리도록 한다(과거 값에 묶여 완화가 지연되는 역설
-        # 방지).
-        self._route_speed_prev = None
-        # [199차] 불연속 감지 게이트도 동일 이유로 리셋.
-        self._route_apex_speed_prev = None
-        self._route_apex_boost_armed = False
-        self._route_apex_boost_armed_speed = None
+        out_speed = None
+        # [223차] lookahead 윈도우 내 유효 포인트 부족 -- ACTIVE 중이었다면
+        # 즉시 해제(hold 없이, 위 navi 비활성 분기와 동일 원칙).
+        if self.route_active:
+            self.route_active = False
         #self.params.remove("NavDestination")
 
     return resampled_points, resampled_distances, out_speed #speeds, distances
+
 
 
   def make_send_message(self):

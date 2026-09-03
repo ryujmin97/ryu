@@ -1115,16 +1115,26 @@ class CarrotServ:
     # 이 곱셈이 repo 내 유일한 사용처였으므로(라인 304 주석 참고) route
     # 감속에 대해서는 이제 관여하지 않는다. autoCurveSpeedLowerLimit 바닥은
     # 그대로 유지(route가 이 값 밑으로는 내려가지 않는 기존 하한).
-    route_speed = max(route_speed, self.autoCurveSpeedLowerLimit)
-    if self.turnSpeedControlMode in [2, 3, 4]:
-      # 81차: mode 2의 -500<xDistToTurn<500(TBT 회전지점 근접) 게이트를 제거.
-      # 기존엔 TBT 안내가 없는 일반 도로 굽이길에서 route_speed가 계산은 되고도
-      # 후보에서 빠져 vturn 단독으로만 대응하던 사각지대가 있었음(mode 2도 mode
-      # 3/4처럼 항상 참가하도록 통일). vturn 참가 조건(위 [1,2] 분기)은 그대로라
-      # mode 2에서 vturn+route가 함께 경쟁하는 구조가 됨(mode 3/4는 기존대로
-      # vturn 자체가 미참가라 route 단독).
-      speed_n_sources.append((route_speed, "route"))
-      #speed_n_sources.append((self.calculate_current_speed(dist, speed * self.mapTurnSpeedFactor, 0, 1.2), "route"))
+    # [223차, design doc §2/§19, STEP3 결론] route_speed가 None이면 route가
+    # 이번 프레임 비활성(mode 0/1, RELEASE 2초 hold 중, 직선, 또는 ACTIVE
+    # 진입조건 미충족)이라는 뜻 -- carrot_man.py::carrot_navi_route()가
+    # 명시적으로 반환한 값이다. 과거(211~221차)엔 이 경우도 150(=
+    # ROUTE_MAX_SPEED_KPH) sentinel을 그대로 append해서, "150이 다른 후보
+    # 보다 항상 큰가"라는 암묵적 가정에 안전을 의존했다(§19가 우려한 "route
+    # source가 이전 값을 붙잡는 현상"의 원인 중 하나). 이제는 None이면 애초에
+    # speed_n_sources 후보에 넣지 않아 min() 경쟁에서 구조적으로 제외한다 --
+    # 다른 소스가 150을 넘는 비정상 상황에서도 안전하다.
+    if route_speed is not None:
+      route_speed = max(route_speed, self.autoCurveSpeedLowerLimit)
+      if self.turnSpeedControlMode in [2, 3, 4]:
+        # 81차: mode 2의 -500<xDistToTurn<500(TBT 회전지점 근접) 게이트를 제거.
+        # 기존엔 TBT 안내가 없는 일반 도로 굽이길에서 route_speed가 계산은 되고도
+        # 후보에서 빠져 vturn 단독으로만 대응하던 사각지대가 있었음(mode 2도 mode
+        # 3/4처럼 항상 참가하도록 통일). vturn 참가 조건(위 [1,2] 분기)은 그대로라
+        # mode 2에서 vturn+route가 함께 경쟁하는 구조가 됨(mode 3/4는 기존대로
+        # vturn 자체가 미참가라 route 단독).
+        speed_n_sources.append((route_speed, "route"))
+        #speed_n_sources.append((self.calculate_current_speed(dist, speed * self.mapTurnSpeedFactor, 0, 1.2), "route"))
 
     model_turn_speed = max(sm['modelV2'].meta.modelTurnSpeed, self.autoCurveSpeedLowerLimit)
 
@@ -1180,7 +1190,8 @@ class CarrotServ:
         source = "gas"
         desired_speed = self.gas_override_speed
 
-      self.debugText += f"route={route_speed:.1f}"#f"desired={desired_speed:.1f},{source},g={self.gas_override_speed:.0f}"
+      # [223차] route_speed가 None(route 비활성/미개입)일 수 있으므로 포맷 전 방어.
+      self.debugText += f"route={route_speed:.1f}" if route_speed is not None else "route=off"
 
     left_spd_sec = 100
     left_tbt_sec = 100
