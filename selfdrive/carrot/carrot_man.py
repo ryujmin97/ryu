@@ -908,17 +908,28 @@ class CarrotMan:
                     # autoNaviSpeedDecelRate(comfort cap)로 상한을 씌운 뒤
                     # 이번 프레임 한 스텝만 vEgo에서 차감한다. 이전 프레임
                     # 출력에 의존하는 상태가 전혀 없다(design/
-                    # 223cha_step2_decel_formula.md 참고, out_speed<=vEgo가
-                    # 수식 구조 자체로 항상 보장됨을 증명 완료).
+                    # 223cha_step2_decel_formula.md 참고).
+                    # [224차, ceiling-fix, "224차 Route 로직 수정 지침" §9]
+                    # 위 223차 주석은 "out_speed<=vEgo가 수식 구조 자체로
+                    # 항상 보장됨"이라 적었으나 실제로는 v_ego_ms<=target_ms
+                    # 분기에서 out_speed_ms=max(target_ms, v_ego_ms)=target_ms로
+                    # 확정되어 이 보장이 깨졌었다(224차 실차로그: apex 40m
+                    # 앞 80.8초 정지 중 out_speed가 vEgo=0 대신 target
+                    # 45~47kph로 유지 -- route는 vEgo에 대한 상한(ceiling)일
+                    # 뿐 가속 목표가 아닌데 사실상 가속 목표처럼 동작).
+                    # v_ego_ms<=target_ms(또는 eff_dist<=0)면 애초에 감속할
+                    # 필요가 없으므로 vEgo를 그대로 통과시킨다(inert) --
+                    # target_ms까지 끌어올리지 않는다.
                     self.route_active = True
                     target_ms = apex_speed / 3.6
                     eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
                     if v_ego_ms <= target_ms or eff_dist <= 0:
                         required_decel_mss = 0.0
+                        out_speed_ms = v_ego_ms
                     else:
                         required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
-                    applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
-                    out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
+                        applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
+                        out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
                     out_speed = out_speed_ms * 3.6
 
             # [223차] out_speed(제어입력)가 실제 계산됐을 때만 텔레메트리를
