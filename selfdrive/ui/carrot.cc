@@ -1318,16 +1318,18 @@ protected:
           }
 
           // 2줄: "route=" + 숫자(강조). prefix+숫자를 하나의 단위로 우측끝(right_x)에
-          // 정렬(숫자 오른쪽 끝이 right_x, prefix가 그 왼쪽에 바로 이어 붙음).
-          // [230차, 사용자 지시] 폰트 크기를 최초 구현(154/156차) 당시 값으로 원복:
-          // 211차가 축소했던 1.5배(fs_prefix*3/2) -> 2배(fs_prefix*2)로 되돌림.
+          // 정렬(숫자 오른쪽 끝이 right_x, prefix가 그 왼쪽에 바로 이어 붙음 -> 화면상
+          // "route=145.1" 순서, prefix가 왼쪽, 숫자가 오른쪽. 이 순서/로직은 변경 없음).
+          // [232차, 사용자 지시] 154/156차 이후 유지되던 "숫자 = prefix의 2배" 비율을
+          // 폐지. 숫자도 박스 안 다른 텍스트와 동일한 크기(FS(26))로 통일하고,
+          // 강조는 색상(초록)만으로 유지한다.
           if (name_line2.length() > 0) {
             size_t eq = name_line2.find('=');
             std::string prefix = (eq == std::string::npos) ? name_line2 : name_line2.substr(0, eq + 1); // "route="
             std::string number = (eq == std::string::npos) ? "" : name_line2.substr(eq + 1);            // "145.1"
 
-            const int fs_prefix = FS(26);        // [231차] 기존 26에 전체 스케일(1.3x) 적용
-            const int fs_number = fs_prefix * 2; // 154/156차 당시 비율(prefix의 2배)은 유지, 그 위에 스케일 적용
+            const int fs_prefix = FS(26);   // [231차] 전체 스케일(1.3x) 적용
+            const int fs_number = fs_prefix; // [232차] prefix와 동일 크기로 통일(기존 2배 비율 폐지), 색상만 초록으로 강조
             float line2_y = tbt_y + 235;      // 박스 하단쪽 절대좌표, 줄바꿈 여부와 무관하게 고정
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
