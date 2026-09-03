@@ -1125,7 +1125,22 @@ class CarrotServ:
     # speed_n_sources 후보에 넣지 않아 min() 경쟁에서 구조적으로 제외한다 --
     # 다른 소스가 150을 넘는 비정상 상황에서도 안전하다.
     if route_speed is not None:
-      route_speed = max(route_speed, self.autoCurveSpeedLowerLimit)
+      # [224차, "224차 Route 로직 수정 지침" §5, 버그 수정] 224차
+      # carrot_man.py::carrot_navi_route() ceiling-fix(§2/§4 -- route는
+      # vEgo를 넘지 않는 상한이지 가속 목표가 아님)로 route_speed(=이 시점
+      # 이미 ceiling-limited out_speed)는 항상 v_ego_kph 이하로 보장된다.
+      # 그런데 구코드는 여기서 autoCurveSpeedLowerLimit(기본 30kph, 사용자
+      # 조절범위 30~200) 바닥을 무조건 적용해, route_speed(예: 정지 중
+      # ceiling-fix에 의해 0)를 30kph로 다시 밀어올렸다 -- 224차
+      # carrot_man.py 수정이 막 없앤 "route가 vEgo보다 높은 값을 출력"
+      # 버그를 이 한 줄이 그대로 재현시키는 구조였다(정지 중이 아니어도
+      # v_ego_kph < autoCurveSpeedLowerLimit인 저속 구간이면 동일하게 재현
+      # 가능). autoCurveSpeedLowerLimit 자체의 원래 목적(곡률 계산 노이즈로
+      # 목표속도가 비정상적으로 낮게 나오는 것을 막는 하한)은 유지하되,
+      # v_ego_kph를 넘어서까지 끌어올리지는 않도록 상한을 다시 씌운다
+      # (최소변경 원칙, §27 -- 이 줄만 수정, 바닥값 자체나 다른 소스는
+      # 그대로 둠). 검증: toolkit/sim_route_224_serv_floor_fix.py.
+      route_speed = min(v_ego_kph, max(route_speed, self.autoCurveSpeedLowerLimit))
       if self.turnSpeedControlMode in [2, 3, 4]:
         # 81차: mode 2의 -500<xDistToTurn<500(TBT 회전지점 근접) 게이트를 제거.
         # 기존엔 TBT 안내가 없는 일반 도로 굽이길에서 route_speed가 계산은 되고도
