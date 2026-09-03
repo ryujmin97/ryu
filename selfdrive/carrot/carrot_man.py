@@ -454,6 +454,15 @@ class CarrotMan:
     # §2)와 route_release_time(apex 도달 직후 RELEASE된 monotonic 시각,
     # None이면 hold 중이 아님, §11).
     self.route_active = False
+    # [228차, route_inert v2] route_active=True(ACTIVE 추적 중)이면서도
+    # "아직 거리는 남았지만 vEgo가 이미 target 이하"인 far-inert 프레임을
+    # 구분하기 위한 신규 상태(route_active와 동일한 mirroring 패턴, 아래
+    # carrot_navi_route() 3분기 및 carrot_serv 전달부 참고). apex 근접
+    # (eff_dist<=0) 구간은 여기 포함되지 않는다 -- 그 구간은 224차 의도대로
+    # route_inert=False로 남겨 carrot_serv.py의 vEgo 상한 클램프 경로를
+    # 그대로 태워야 floor(autoCurveSpeedLowerLimit)가 v_ego=0을 강제로
+    # 밀어올리는 회귀가 재발하지 않는다(FINDINGS.md 228차 "2차 버그").
+    self.route_inert = False
     self.route_release_time = None
 
     self.active_carrot_last = False
@@ -634,6 +643,9 @@ class CarrotMan:
       # 매 호출마다 무조건 리셋하므로 mode가 0/1로 머무는 동안은 계속 초기
       # 상태 유지, 0/1 -> 2/3 재전환 시에도 잔여 상태 없이 새로 검색 시작(§18).
       self.route_active = False
+      # [228차] mode 0/1 전환 시 route_inert도 함께 초기화 -- 0/1로 머무는
+      # 동안 stale True가 남아 carrot_serv 클램프 판정을 오염시키지 않도록.
+      self.route_inert = False
       self.route_release_time = None
       return [], [], None
 
@@ -668,6 +680,9 @@ class CarrotMan:
       # 재부착 방지"이지, navi 자체가 끊긴 경우까지 인위적으로 지연시킬
       # 이유가 없음 -- 제약 해제는 항상 즉시 반영이 안전하다는 132차 원칙 계승).
       self.route_active = False
+      # [228차] navi 비활성으로 인한 즉시 해제 시에도 route_inert를
+      # 함께 초기화(위 mode 0/1 분기와 동일 이유).
+      self.route_inert = False
       return [], [], None
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
@@ -872,6 +887,10 @@ class CarrotMan:
                 # (예: 후보가 사라짐 == 사실상 통과) 즉시 RELEASE+hold 시작.
                 if self.route_active:
                     self.route_active = False
+                    # [228차] candidate 소실로 인한 RELEASE 시 route_inert도
+                    # 함께 해제 -- ACTIVE 추적이 끝났으므로 far-inert 마킹이
+                    # 남아있으면 다음 진입 프레임 판정을 오염시킬 수 있다.
+                    self.route_inert = False
                     self.route_release_time = time.monotonic()
                 out_speed = None
             else:
@@ -891,6 +910,8 @@ class CarrotMan:
                 if self.route_active and apex_dist <= ROUTE_APEX_REACHED_DIST_M:
                     # [223차, design doc §10] apex 도달 -- 즉시 RELEASE, 2초 hold 시작.
                     self.route_active = False
+                    # [228차] apex 도달 RELEASE 시 route_inert도 함께 해제.
+                    self.route_inert = False
                     self.route_release_time = time.monotonic()
                     out_speed = None
                 elif not self.route_active and v_ego_kph <= apex_speed:
@@ -912,6 +933,10 @@ class CarrotMan:
                     # 80이라는 ceiling만 유지된다. route_active는 여전히
                     # False로 유지(추적 시작 아님, §11 대상 아님, hold도
                     # 안 걸림 -- 이 줄 하나 외 다른 상태 변경 없음, §27).
+                    # [228차] 이 분기는 route_active=False(추적 아님)이므로
+                    # route_inert도 False로 방어적으로 유지(§27, 상태 정의상
+                    # 항상 False여야 하지만 stale 값 잔류를 명시적으로 차단).
+                    self.route_inert = False
                     out_speed = apex_speed
                 else:
                     # [223차, design doc §7/§8, STEP2 신규 감속식] ACTIVE
@@ -936,13 +961,42 @@ class CarrotMan:
                     self.route_active = True
                     target_ms = apex_speed / 3.6
                     eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
-                    if v_ego_ms <= target_ms or eff_dist <= 0:
+                    # [228차, route_inert v2, FINDINGS.md 228차] 224차가 합쳤던
+                    # `v_ego_ms<=target_ms or eff_dist<=0` 단일 분기를 원인이
+                    # 다른 두 경우로 재분리한다.
+                    if eff_dist <= 0:
+                        # [224차 의도 그대로 유지] apex 근접 -- vEgo를 그대로
+                        # 통과시킨다(inert). route_inert=False로 남겨 아래
+                        # carrot_serv.py 클램프가 기존 vEgo 상한 경로를 타게
+                        # 한다 -- 그래야 autoCurveSpeedLowerLimit floor가
+                        # v_ego=0을 강제로 밀어올리지 않는다(228차 2차 버그
+                        # 회귀 방지, v2 스크립트 CASE F).
                         required_decel_mss = 0.0
                         out_speed_ms = v_ego_ms
+                        self.route_inert = False
+                    elif v_ego_ms <= target_ms:
+                        # [228차, 신규] far-inert -- 아직 apex까지 거리는
+                        # 남았지만(eff_dist>0) 이미 vEgo가 target 이하. 224차는
+                        # 이 경우도 out=v_ego_ms(그대로 통과)로 처리했으나,
+                        # 그 값을 carrot_serv.py의 227차 클램프
+                        # (route_active=True -> min(v_ego_kph, ...))가 다시
+                        # v_ego 그 자체로 눌러버려 정차 원인이 해소된 뒤에도
+                        # route_speed가 0에서 벗어나지 못하는 자기참조적 고착이
+                        # 발생했다(FINDINGS.md 228차 "고착 메커니즘"). out을
+                        # target_ms로 유지하고 route_inert=True로 마킹해 아래
+                        # carrot_serv.py가 이 프레임의 vEgo 상한 클램프를
+                        # 생략하도록 한다.
+                        required_decel_mss = 0.0
+                        out_speed_ms = target_ms
+                        self.route_inert = True
                     else:
+                        # [223차 STEP2 감속식 그대로 유지] 실제 감속 구간 --
+                        # route_inert=False(진짜 감속 중이므로 vEgo 상한
+                        # 클램프가 계속 적용되어야 ceiling 의미가 유지된다).
                         required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
                         applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
                         out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
+                        self.route_inert = False
                     out_speed = out_speed_ms * 3.6
 
             # [223차] out_speed(제어입력)가 실제 계산됐을 때만 텔레메트리를
@@ -959,6 +1013,8 @@ class CarrotMan:
             # 즉시 해제한다(hold 없이 -- 실제 곡선 이탈이 아니라 데이터 부족
             # 사유이므로 132차 "제약 해제는 즉시" 원칙 계승).
             self.route_active = False
+            # [228차] 위와 동일 이유로 route_inert도 함께 해제.
+            self.route_inert = False
     else:
         resampled_points = []
         resampled_distances = []
@@ -970,6 +1026,9 @@ class CarrotMan:
         # 즉시 해제(hold 없이, 위 navi 비활성 분기와 동일 원칙).
         if self.route_active:
             self.route_active = False
+            # [228차] lookahead 포인트 부족으로 인한 즉시 해제 시에도
+            # route_inert를 함께 초기화(위 두 "즉시 해제" 분기와 동일 이유).
+            self.route_inert = False
         #self.params.remove("NavDestination")
 
     # [227차] carrot_serv.py::update_navi()가 ACTIVE 추적 분기(vEgo 상한
@@ -978,6 +1037,12 @@ class CarrotMan:
     # carrot_serv에도 반영한다(위 route_apex_* 계측과 동일 패턴 -- 별개
     # 객체이므로 계산 직후 값을 써줌, FINDINGS.md 227차).
     self.carrot_serv.route_active = self.route_active
+    # [228차] route_active와 동일한 mirroring 패턴으로 route_inert도 이번
+    # 프레임 최종값을 carrot_serv에 반영한다 -- carrot_serv.py::
+    # update_navi()가 ACTIVE 추적 중 실제 감속(route_inert=False) vs
+    # far-inert(route_inert=True) 상태를 구분해 vEgo 상한 클램프 적용
+    # 여부를 결정한다(FINDINGS.md 228차).
+    self.carrot_serv.route_inert = self.route_inert
 
     return resampled_points, resampled_distances, out_speed #speeds, distances
 

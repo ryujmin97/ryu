@@ -186,6 +186,15 @@ class CarrotServ:
     # 상수 ceiling)는 route_speed의 의미가 다르므로 클램프도 분기별로
     # 달라야 한다 -- 아래 update_navi()에서 이 값으로 구분.
     self.route_active = False
+    # [228차, route_inert v2, FINDINGS.md 228차] route_active=True(ACTIVE
+    # 추적) 중에서도 "아직 거리는 남았지만 vEgo가 이미 target 이하"인
+    # far-inert 프레임을 구분하기 위한 신규 상태. 위 route_active와 동일한
+    # mirroring 패턴(carrot_man.py::carrot_navi_route()가 매 프레임 계산
+    # 직후 이 속성에 값을 씀)으로 존재 -- route_active=True인데
+    # route_inert=True이면 아래 update_navi()의 vEgo 상한 클램프를
+    # 생략해야 정차 원인 해소 후 재가속 경로가 막히는 자기참조적 고착이
+    # 재발하지 않는다.
+    self.route_inert = False
 
     # [204차 계측, 203차 옵션1] apex 선택 직전의 candidates 리스트(개수 +
     # 최근접 3개) 관측용 저장 공간. 위 route_apex_* 와 동일한 이유/패턴으로
@@ -1164,7 +1173,18 @@ class CarrotServ:
       # 증명이었음 -- 225차가 이미 한 번 정정한 것과 같은 종류의 일반화
       # 오류). False일 때는 autoCurveSpeedLowerLimit 하한만 유지(§27 최소
       # 변경 -- 하한 목적 자체는 두 분기 모두 동일하게 필요).
-      if self.route_active:
+      # [228차, route_inert v2, FINDINGS.md 228차] route_active=True이면서도
+      # route_inert=True(far-inert -- 아직 거리는 남았지만 vEgo가 이미
+      # target 이하)인 프레임에는 vEgo 상한 클램프를 생략한다. 227차는
+      # route_active만으로 분기했으나, ACTIVE 추적 중 vEgo가 완전히 0까지
+      # 떨어지면 이 클램프가 carrot_man이 무엇을 계산해 넘기든
+      # route_speed를 다시 실측 v_ego로 눌러버려, 정차 원인이 해소된 뒤에도
+      # route_speed가 0에서 벗어나지 못하는 자기참조적 고착이 발생했다
+      # (결함이 carrot_man.py 단독이 아니라 이 클램프까지 두 파일에 걸쳐
+      # 있었음). route_inert=False(eff_dist<=0 apex 근접 구간 포함, 224차
+      # 의도 보존) 및 route_active=False(ceiling 분기)에서는 기존 동작
+      # 그대로 유지.
+      if self.route_active and not self.route_inert:
         route_speed = min(v_ego_kph, max(route_speed, self.autoCurveSpeedLowerLimit))
       else:
         route_speed = max(route_speed, self.autoCurveSpeedLowerLimit)
