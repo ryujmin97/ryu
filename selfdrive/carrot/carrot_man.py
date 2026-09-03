@@ -899,7 +899,20 @@ class CarrotMan:
                     # 않는다(가속 명령 절대 생성 금지, 45->50으로 올리지 않음).
                     # hold를 걸지 않는다 -- 애초에 ACTIVE였던 적이 없으므로
                     # §11(재부착 방지)의 대상이 아니다.
-                    out_speed = None
+                    # [226차, "Route 감속 다음 설계 방향" + ChatGPT 225차
+                    # 정적점검] out_speed=None이면 carrot_serv.py::
+                    # update_navi()가 route를 speed_n_sources에서 완전히
+                    # 제외해, route=vEgo 상한(ceiling)이라는 설계 의도와
+                    # 달리 apex_speed ceiling 자체가 사라져 vCruise 등
+                    # 다른 소스가 desired_speed를 apex_speed 위로 밀어올릴
+                    # 수 있었다(예: vEgo=60/apex=80/vCruise=100 -> 100까지
+                    # 개방). out_speed=apex_speed로 바꿔 route를 min()
+                    # 후보로 계속 남긴다 -- min()은 절대 위로 밀어올리지
+                    # 않으므로 "가속 명령 생성 금지"는 그대로 보장되면서
+                    # 80이라는 ceiling만 유지된다. route_active는 여전히
+                    # False로 유지(추적 시작 아님, §11 대상 아님, hold도
+                    # 안 걸림 -- 이 줄 하나 외 다른 상태 변경 없음, §27).
+                    out_speed = apex_speed
                 else:
                     # [223차, design doc §7/§8, STEP2 신규 감속식] ACTIVE
                     # 진입 또는 계속 추적. 매 프레임 실측 vEgo와 apex까지
