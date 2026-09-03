@@ -1124,6 +1124,13 @@ protected:
     // (박스 하단 좌표는 고정, 상단만 위로 이동 — 다른 요소 위치 영향 없음).
     static constexpr int TBT_LINE_STEP = 40;
     static constexpr int TBT_MAX_NAME_LINES = 2;
+    // [231차, 사용자 지시] route 숫자 한 요소만 별도 배율(1.5x->2x)로 강조하는
+    // 대신, 경로안내창(TBT HUD) 박스 내부의 모든 텍스트(상단 안내문구,
+    // 회전/차선변경 라벨, 잔여거리, ETA, 도로명, route=prefix+숫자)에
+    // 동일한 배율을 곱해 전체 글자 크기를 일괄 확대한다. prefix 대비 숫자를
+    // 더 크게 보이게 하는 기존 2배 비율(154/156차 기원) 자체는 유지하고,
+    // 그 위에 이 배율을 얹는다.
+    static constexpr float TBT_FONT_SCALE = 1.3f;
 
     int  drawTurnInfoHud(const UIState* s) {
       if (s->fb_w < 1200) return -1;
@@ -1147,14 +1154,17 @@ protected:
         int tbt_y = s->fb_h - 250;
         int right_x = tbt_x + TBT_BOX_W - 20; // [230차] 하단 두 줄(도로명/route=) 우측끝 정렬 기준 x좌표
         NVGcolor stroke_color = COLOR_WHITE;
+        // [231차] 이 함수 안의 모든 폰트 크기는 기존(스케일 적용 전) 값에
+        // TBT_FONT_SCALE(1.3배)을 곱해서 사용한다 (반올림).
+        auto FS = [](int base) { return (int)(base * TBT_FONT_SCALE + 0.5f); };
 
         // [230차] 도로명(szPosRoadName 1줄)이 박스 폭을 넘으면 최대
         // TBT_MAX_NAME_LINES줄까지 자동 줄바꿈. 아래 박스를 그리기 전에 먼저
         // 계산해서, 줄바꿈이 실제로 필요한 만큼만 박스 높이를 위로 넉넉하게 잡는다.
         auto wrap_name_lines = [&](const std::string& txt, float avail_w) {
           std::vector<std::string> lines;
-          int fs = 30;
-          for (; fs >= 20; fs -= 2) {
+          int fs = FS(30);
+          for (; fs >= FS(20); fs -= 3) {
             nvgFontSize(s->vg, fs);
             nvgFontFace(s->vg, BOLD);
             float bounds[4];
@@ -1167,7 +1177,7 @@ protected:
             NVGtextRow rows[TBT_MAX_NAME_LINES];
             int nrows = nvgTextBreakLines(s->vg, txt.c_str(), NULL, avail_w, rows, TBT_MAX_NAME_LINES);
             bool covers_all = (nrows > 0) && (rows[nrows - 1].end == txt.c_str() + txt.size());
-            if (covers_all || fs <= 20) {
+            if (covers_all || fs <= FS(20)) {
               lines.clear();
               for (int i = 0; i < nrows; i++) lines.push_back(std::string(rows[i].start, rows[i].end));
               break;
@@ -1178,7 +1188,7 @@ protected:
 
         std::string name_line1, name_line2;
         std::vector<std::string> name_wrapped;
-        int name_fs = 30;
+        int name_fs = FS(30);
         int tbt_extra_h = 0;
         if (szSdiDescr.length() == 0 && szPosRoadName.length() > 0) {
           std::string full = szPosRoadName.toStdString();
@@ -1208,7 +1218,7 @@ protected:
         // 상단: 안내 문구 (예: "분기점")
         if (szTBTMainText.length() > 0) {
           nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
-          ui_draw_text(s, tbt_x + 20, tbt_y - 15, szTBTMainText.toStdString().c_str(), 32, COLOR_WHITE, BOLD);
+          ui_draw_text(s, tbt_x + 20, tbt_y - 15, szTBTMainText.toStdString().c_str(), FS(32), COLOR_WHITE, BOLD);
         }
 
         // 좌측: 회전/분기 아이콘 + 잔여거리 (세로 배치, 아이콘 축소)
@@ -1226,11 +1236,11 @@ protected:
             case 3: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_lane_change_l", 1.0f); break;
             case 4: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_lane_change_r", 1.0f); break;
             case 7: ui_draw_image(s, { bx - TBT_ICON_SIZE / 2, by - TBT_ICON_SIZE / 2, TBT_ICON_SIZE, TBT_ICON_SIZE }, "ic_turn_u", 1.0f); break;
-            case 6: ui_draw_text(s, bx, by + 15, "TG", 28, COLOR_WHITE, BOLD); break;
-            case 8: ui_draw_text(s, bx, by + 15, "목적지", 26, COLOR_WHITE, BOLD); break;
+            case 6: ui_draw_text(s, bx, by + 15, "TG", FS(28), COLOR_WHITE, BOLD); break;
+            case 8: ui_draw_text(s, bx, by + 15, "목적지", FS(26), COLOR_WHITE, BOLD); break;
             default:
                 sprintf(str, "감속:%d", xTurnInfo);
-                ui_draw_text(s, bx, by + 15, str, 26, COLOR_WHITE, BOLD);
+                ui_draw_text(s, bx, by + 15, str, FS(26), COLOR_WHITE, BOLD);
                 break;
             }
             if (s->scene.is_metric) {
@@ -1241,7 +1251,7 @@ protected:
               if (xDistToTurn < 1609) sprintf(str, "%d ft", (int)(xDistToTurn * 3.28084));
               else sprintf(str, "%.1f mi", xDistToTurn / 1609.344f);
             }
-            ui_draw_text(s, bx, by + 95, str, 32, COLOR_WHITE, BOLD);
+            ui_draw_text(s, bx, by + 95, str, FS(32), COLOR_WHITE, BOLD);
         }
 
         // 우측: 도착예정시간 + 잔여거리 (세로 2줄, 폭 축소에 맞춰 폰트 40 -> 32)
@@ -1255,25 +1265,26 @@ protected:
             mktime(local);
             bool is_kor = s->language == "main_ko";
             sprintf(str, "%s: %.1f%s(%02d:%02d)", (is_kor)?"도착":"ETA", (float)nGoPosTime / 60., (is_kor)?"분":"MIN", local->tm_hour, local->tm_min);
-            ui_draw_text(s, info_x, tbt_y + 75, str, 30, COLOR_WHITE, BOLD);
+            ui_draw_text(s, info_x, tbt_y + 75, str, FS(30), COLOR_WHITE, BOLD);
             sprintf(str, "%.1f%s", nGoPosDist / 1000. * ((s->scene.is_metric)?1:KM_TO_MILE), (s->scene.is_metric) ? "km" : "mile");
-            ui_draw_text(s, info_x, tbt_y + 115, str, 30, COLOR_WHITE, BOLD);
+            ui_draw_text(s, info_x, tbt_y + 115, str, FS(30), COLOR_WHITE, BOLD);
         }
 
         // 하단: 과속카메라 안내(szSdiDescr) 또는 도로명(szPosRoadName), 전체 폭 사용
         // 128차: 127차 폭 축소(790->460)로 가용 폭이 420px로 줄어 긴 문구가 박스
-        // 우측 경계를 넘어갈 수 있음 -> 폭 측정 후 초과 시 폰트를 30에서 최소 20까지
-        // 2px 단위로 자동 축소(그래도 넘치면 20 유지, 잘림은 감수)
+        // 우측 경계를 넘어갈 수 있음 -> 폭 측정 후 초과 시 폰트를 FS(30)에서
+        // 최소 FS(20)까지 3px 단위로 자동 축소(그래도 넘치면 FS(20) 유지, 잘림은
+        // 감수). [231차] 기준값 자체를 TBT_FONT_SCALE(1.3x)만큼 키움.
         nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
         auto fit_bottom_text_size = [&](const char* txt) {
-          int fs = 30;
+          int fs = FS(30);
           float bounds[4];
           float avail_w = TBT_BOX_W - 40; // 좌우 20px씩 여백
-          while (fs > 20) {
+          while (fs > FS(20)) {
             nvgFontSize(s->vg, fs);
             nvgTextBounds(s->vg, tbt_x + 20, tbt_y + 220, txt, NULL, bounds);
             if (bounds[2] - bounds[0] <= avail_w) break;
-            fs -= 2;
+            fs -= 3;
           }
           return fs;
         };
@@ -1315,8 +1326,8 @@ protected:
             std::string prefix = (eq == std::string::npos) ? name_line2 : name_line2.substr(0, eq + 1); // "route="
             std::string number = (eq == std::string::npos) ? "" : name_line2.substr(eq + 1);            // "145.1"
 
-            const int fs_prefix = 26;         // 기존과 동일
-            const int fs_number = fs_prefix * 2; // [230차] 원복: 154/156차 당시의 2배
+            const int fs_prefix = FS(26);        // [231차] 기존 26에 전체 스케일(1.3x) 적용
+            const int fs_number = fs_prefix * 2; // 154/156차 당시 비율(prefix의 2배)은 유지, 그 위에 스케일 적용
             float line2_y = tbt_y + 235;      // 박스 하단쪽 절대좌표, 줄바꿈 여부와 무관하게 고정
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
