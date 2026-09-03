@@ -172,6 +172,21 @@ class CarrotServ:
     self.route_apex_speed = 0.0
     self.route_out_speed = 300.0
 
+    # [227차] carrot_man.py::carrot_navi_route()의 self.route_active(ACTIVE
+    # 추적 상태기계, 223차)를 update_navi()에서도 판별하기 위한 저장 공간.
+    # 위 route_apex_* 와 동일한 이유(별개 객체, 계산 직후 이 속성에 값을
+    # 써줌)로 존재 -- 226차가 ACTIVE 진입 게이트(route_active=False 유지)에서
+    # out_speed=apex_speed(ceiling)를 반환하게 바꾼 뒤, 225차 B의
+    # min(v_ego_kph, ...) 클램프가 이 ceiling 분기에도 무차별 적용되어
+    # route_speed가 매 프레임 vEgo 그 자체로 고정되고, 그 결과
+    # desired_speed=min(route,...)도 vEgo로 고정되어 가속 명령이 전혀
+    # 생성되지 않는 회귀가 발견됨(FINDINGS.md 227차, 다중 프레임 시뮬레이션
+    # 재현). ACTIVE 추적 분기(route_active=True, target 방향 실제 감속/inert
+    # 통과)와 ACTIVE 진입 게이트 ceiling 분기(route_active=False, apex_speed
+    # 상수 ceiling)는 route_speed의 의미가 다르므로 클램프도 분기별로
+    # 달라야 한다 -- 아래 update_navi()에서 이 값으로 구분.
+    self.route_active = False
+
     # [204차 계측, 203차 옵션1] apex 선택 직전의 candidates 리스트(개수 +
     # 최근접 3개) 관측용 저장 공간. 위 route_apex_* 와 동일한 이유/패턴으로
     # carrot_man.py가 계산 직후 여기에 값을 써준다. 제어 로직에는 사용되지 않음.
@@ -1140,7 +1155,19 @@ class CarrotServ:
       # v_ego_kph를 넘어서까지 끌어올리지는 않도록 상한을 다시 씌운다
       # (최소변경 원칙, §27 -- 이 줄만 수정, 바닥값 자체나 다른 소스는
       # 그대로 둠). 검증: toolkit/sim_route_224_serv_floor_fix.py.
-      route_speed = min(v_ego_kph, max(route_speed, self.autoCurveSpeedLowerLimit))
+      # [227차] 위 self.route_active 설명 참고 -- ACTIVE 추적 분기(True)만
+      # vEgo 상한 클램프를 적용한다. ACTIVE 진입 게이트 ceiling 분기(False,
+      # 226차가 out_speed=apex_speed를 반환하는 경우)는 apex_speed 자체가
+      # 이미 "이 값을 넘지 말라"는 상한이므로, vEgo로 다시 잘라내면
+      # ceiling이 아니라 vEgo 고착(가속 명령 원천 봉쇄)이 되어버린다(224차
+      # ceiling-fix가 보장한 "route_speed<=vEgo"는 ACTIVE 분기에서만 성립하는
+      # 증명이었음 -- 225차가 이미 한 번 정정한 것과 같은 종류의 일반화
+      # 오류). False일 때는 autoCurveSpeedLowerLimit 하한만 유지(§27 최소
+      # 변경 -- 하한 목적 자체는 두 분기 모두 동일하게 필요).
+      if self.route_active:
+        route_speed = min(v_ego_kph, max(route_speed, self.autoCurveSpeedLowerLimit))
+      else:
+        route_speed = max(route_speed, self.autoCurveSpeedLowerLimit)
       if self.turnSpeedControlMode in [2, 3, 4]:
         # 81차: mode 2의 -500<xDistToTurn<500(TBT 회전지점 근접) 게이트를 제거.
         # 기존엔 TBT 안내가 없는 일반 도로 굽이길에서 route_speed가 계산은 되고도

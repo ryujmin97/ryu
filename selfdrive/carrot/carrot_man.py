@@ -972,6 +972,13 @@ class CarrotMan:
             self.route_active = False
         #self.params.remove("NavDestination")
 
+    # [227차] carrot_serv.py::update_navi()가 ACTIVE 추적 분기(vEgo 상한
+    # 클램프 필요)와 ACTIVE 진입 게이트 ceiling 분기(226차, 클램프 생략
+    # 필요)를 구분할 수 있도록 이번 프레임 최종 self.route_active를
+    # carrot_serv에도 반영한다(위 route_apex_* 계측과 동일 패턴 -- 별개
+    # 객체이므로 계산 직후 값을 써줌, FINDINGS.md 227차).
+    self.carrot_serv.route_active = self.route_active
+
     return resampled_points, resampled_distances, out_speed #speeds, distances
 
 
