@@ -717,7 +717,31 @@ class CarrotMan:
     distance_interval = 10.0
     out_speed = ROUTE_MAX_SPEED_KPH  # [211차] 300 -> 150, 위 self._route_out_speed와 동일 이유(경로는 활성이나 lookahead 내 유효 포인트가 부족해 이 기본값이 그대로 반환되는 경우 포함)
     # [217차] 84/85차 동적 캡(300~600m) 원복 -- 위 주석 참고, 300m 고정.
-    route_lookahead_m = 300.0
+    # [221차, 사용자 설계문서 "Route 감속 다음 설계 방향(2026-09 개정)" 2번 --
+    # 300m -> 600m 고정 확장, 84/85차와는 별개 재도입] **주의 -- 217차가
+    # 정확히 반대 방향(84/85차의 v_ego 기반 "동적" 300~600m 캡 롤백)으로
+    # 이미 되돌린 값을 다시 늘리는 것** -- 당시 롤백 사유는 "탐색범위 자체를
+    # 속도에 따라 늘리면 먼 후속 곡선이 조기에 개입해 apexIdx flicker를
+    # 악화시킨다"(위 217차 주석, 215차 실측 flicker와 연결)였다. 이번 변경은
+    # (1) "동적"이 아니라 "고정 600m"이고, (2) apex 선택 자체는 여전히
+    # candidates[0](=가장 가까운, 감속 필요한 지점, 179/196차)이라 300m
+    # 안에 이미 있던 가장 가까운 감속필요지점의 선택은 바뀌지 않는다(600m
+    # 확장은 candidates 리스트 뒤쪽에 더 먼 후보를 추가할 뿐, distances가
+    # 오름차순이므로 candidates[0]은 불변) -- 즉 84/85차 롤백의 원인이었던
+    # "동적 캡에 의한 apex_idx 재선정"과는 메커니즘이 다르다. 그러나 220차가
+    # 실측으로 확정한 apexIdx flicker의 실제 근본원인("리샘플 그리드가 매
+    # 프레임 현재위치 기준으로 재앵커링되면서 같은 정수 인덱스라도 물리적으로
+    # 다른 지점의 곡률이 나옴")은 lookahead 창 크기와 무관하게 발생하는
+    # 현상이므로, 600m 확장이 이 근본원인 자체를 악화시키는지는 이번
+    # 세션에서 검증되지 않았다(§28 원칙 -- 추측만으로 안전 확정하지 않음).
+    # 사용자 설계문서 자체도 "가까운 점을 먼저 잡고 그 이후를 보는 구조라면
+    # 600m가 후보 혼란을 만들지 않는가"를 코드/로그로 확인하며 진행하겠다고
+    # 명시 -- 이 변경은 그 검증이 완료됐다는 뜻이 아니라 검증을 시작하기
+    # 위한 전제 코드 변경이다. **실차 검증 전까지 219/220차가 다루는
+    # apexIdx flicker/게이트 재설계와 함께 이 변경의 A/B(실차로그 기준
+    # naviPointsActive 활성 구간의 프레임당 apexIdx 변경 빈도, 215차가 쓴
+    # 지표와 동일)를 반드시 대조할 것.**
+    route_lookahead_m = 600.0
     path, self.navi_points_start_index, start_point = get_path_after_distance(self.navi_points_start_index, self.navi_points, current_position, route_lookahead_m)
     relative_coords = []
     if path:
@@ -1029,9 +1053,39 @@ class CarrotMan:
             # 시작해 램프 하강 구간이 크게 줄어든다(위 예시 기준 150->30
             # 이었을 구간이 55->30로 단축). vCruise<=0(크루즈 비활성 등
             # 비정상값)일 때는 기존 150 그대로 폴백해 회귀 없음.
-            v_cruise_kph = self.sm['carState'].vCruise
-            route_ceiling_kph = min(v_cruise_kph, ROUTE_MAX_SPEED_KPH) if v_cruise_kph > 0 else ROUTE_MAX_SPEED_KPH
-            out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), route_ceiling_kph)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체 / [217차] 150 고정 -> min(vCruise,150)
+            #
+            # [221차, 사용자 설계문서 "Route 감속 다음 설계 방향(2026-09 개정)"
+            # 1번 -- ceiling 기준을 vCruise(설정속도) -> vEgo(현재 실제속도)로
+            # 재교체] 217차가 150 고정 -> vCruise 기준으로 낮췄지만, vCruise는
+            # "운전자가 설정한 목표"일 뿐 "차량이 지금 실제로 내고 있는 속도"가
+            # 아니다 -- 예: 설정속도 70, 실제 vEgo 50으로 주행 중(선행차 추종 등)
+            # 이면 217차 기준(vCruise=70)은 route가 "70에서부터 커브목표(40)까지
+            # 감속거리를 계산"하게 만들어, 이미 50으로 달리고 있는 차량 입장에서
+            # 시작점 자체가 실제보다 20km/h 높게 잡히는 오차가 생긴다. 사용자
+            # 지시: "route가 차량보다 높은 속도를 강제로 요구하는 구조가 되면
+            # 안 된다" -- ceiling을 vEgo 기준으로 바꾸면 이 조건이 자동으로
+            # 성립한다(증명: out_speed = min(raw, max(vEgo,sharpest), vEgo) 이고
+            # max(vEgo,sharpest) >= vEgo 이므로 세 번째 항이 항상 지배 ->
+            # out_speed <= vEgo 가 항상 보장됨 -- "vEgo가 route 계산 현재위치
+            # 허용속도보다 낮으면 route는 개입하지 않는다"는 안전조건도 별도
+            # 분기 없이 이 min() 구조 자체로 만족).
+            # 부작용(반드시 인지): 위 max(vEgo, sharpest_candidate_speed) 항은
+            # 이 변경으로 route_ceiling_kph(=vEgo, vEgo<150 정상범위에서) 이하로
+            # 항상 눌리므로 out_speed 결정에 더 이상 영향을 주지 못하는 사실상
+            # 죽은 항이 된다(207/214차가 도입한 "sharpest_candidate_speed로
+            # ceiling을 더 관대하게 풀어주는" 효과가 vEgo 상한 아래에서는 발동할
+            # 수 없음) -- §27 최소변경 원칙에 따라 변수/계산 자체는 삭제하지
+            # 않고 그대로 둔다(향후 vEgo 기준을 되돌릴 경우 diff 최소화,
+            # telemetry 일관성 유지). vEgo<=0(정지/센서 이상 등 비정상값)일
+            # 때는 기존과 동일하게 150 그대로 폴백.
+            # **검증**: devnotes toolkit/sim_route_ceiling_vego_221.py -- 사용자
+            # 설계문서 예시 2건(vCruise=70/vEgo=70/목표=40, vCruise=70/vEgo=50/
+            # 목표=40) 그대로 재현 + vEgo<목표(무개입) 시나리오 포함, 합성
+            # 시나리오만 수행(PASS). 218차가 디바이스에 이미 적용한
+            # AutoNaviSpeedDecelRate=1.00 m/s² 기준으로 검증(사용자 설계문서
+            # 4번). **실차 검증: 미실시**.
+            route_ceiling_kph = min(v_ego_kph, ROUTE_MAX_SPEED_KPH) if v_ego_kph > 0 else ROUTE_MAX_SPEED_KPH
+            out_speed = min(out_speed, max(v_ego_kph, sharpest_candidate_speed), route_ceiling_kph)  # [207차] 상한(ceiling) 항만 apex_speed -> sharpest_candidate_speed로 교체 / [217차] 150 고정 -> min(vCruise,150) / [221차] vCruise -> vEgo 기준으로 재교체
             # accel_limit_kmh 기본값(부스트 없을 때) -- 132차 램프리미터가
             # 그대로 사용.
             base_accel_limit_kmh = self.carrot_serv.autoNaviSpeedDecelRate * 3.6
