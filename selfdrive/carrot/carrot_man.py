@@ -150,7 +150,19 @@ ROUTE_RELEASE_HOLD_S = 2.0
 # 237차에 재확인)로 seg12-16 로그(5999행) 기준 stage0(172건)->stage1(60건)
 # 프레임간 apex 점프(>40m) 감소를 사전검증함(§31 실차 patch 전 필수 검증
 # 절차 준수). 실차 검증은 이 패치 적용 전까지 미실시.
-ROUTE_SEVERITY_GATE_RATIO = 0.70
+#
+# [242차, 정정] 239차에서 이 게이트가 매 프레임 라이브 vEgo로 재평가되어
+# candidate가 target/RATIO 근방에서 자기 자신을 소거(self-elimination)하고
+# 재가속->재게이트통과->재감속을 반복하는 리밋사이클 진동을 만든다는
+# CRITICAL 구조적 결함이 확인됨(FINDINGS.md 239차 참고). 이 구조 자체는
+# RATIO 값과 무관하게 남아있음 -- 값을 올리면 진폭만 줄어든다
+# (평형속도 ≈ target*(1/RATIO)). 0.70일 때 +43%, 0.90일 때 +11% 근방으로
+# 진동 폭을 완화하는 잠정 조치. 240/241차의 route->vturn 자연 핸드오프
+# 실측(vEgo>=30kph, n=3, ratio 0.932~0.966)이 0.9 근방과 유사한 것을
+# 참고했으나 표본 부족(§28)으로 확정값 아님 -- 사용자 지시로 실차주행
+# 결과를 보며 나머지 검증(①~④, 239차 리밋사이클 실측 등)을 이어간다.
+# 실차 검증: 이 패치 기준으로 아직 미실시.
+ROUTE_SEVERITY_GATE_RATIO = 0.90
 
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
