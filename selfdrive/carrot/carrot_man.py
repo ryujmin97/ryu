@@ -138,6 +138,20 @@ ROUTE_APEX_REACHED_DIST_M = 10.0
 # 재부착되는 현상을 막기 위한 목적. 사용자 설계문서 지시값 그대로(2초).
 ROUTE_RELEASE_HOLD_S = 2.0
 
+# [237차, 신규] Route severity gate -- apex 후보로 인정할 커브의 최소
+# "심각도" 기준. 235/236차 실측(seg12-16 로그, devnotes WIP.md 235/236차)
+# 으로 확정된 설계: 후보 apex_speed가 현재 vEgo의 이 비율 이상이면(=이미
+# 충분히 완만해 별도 사전감속이 불필요하거나, vturn이 그 시점 vEgo/곡률로
+# 충분히 커버 가능한 수준) route apex 후보에서 제외한다.
+# relative_speed_ratio = apex_speed / max(vEgo_kph, 1.0) >= 이 값이면 skip.
+# 기준은 nRoadLimitSpeed가 아니라 vEgo(234차 계속9/10에서 재확정, 계속6의
+# nRoadLimitSpeed 기준안은 오류로 정정됨 -- FINDINGS.md 234차 참고).
+# toolkit/sim_route_234_spatial_apex_continuity.py(234차 계속4~10,
+# 237차에 재확인)로 seg12-16 로그(5999행) 기준 stage0(172건)->stage1(60건)
+# 프레임간 apex 점프(>40m) 감소를 사전검증함(§31 실차 patch 전 필수 검증
+# 절차 준수). 실차 검증은 이 패치 적용 전까지 미실시.
+ROUTE_SEVERITY_GATE_RATIO = 0.70
+
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
 def haversine(lon1, lat1, lon2, lat2):
@@ -865,8 +879,24 @@ class CarrotMan:
             # 제거했다. candidates[0](거리 오름차순 첫 감속 필요 지점)을
             # 게이트 없이 그대로 apex로 선택 -- 이유는 위 상수 정의부 주석
             # 참고. 실차 검증 필수(196차 실차 검증: 미실시).
+            v_ego_ms = self.sm['carState'].vEgo
+            v_ego_kph = v_ego_ms * 3.6
+
             road_limit_speed = self.carrot_serv.nRoadLimitSpeed
             candidates = [k for k in range(len(speeds)) if speeds[k] < road_limit_speed]
+            # [237차, 신규] severity gate (stage1) -- 위 road_limit_speed
+            # 필터(stage0, 196차)는 그대로 유지한 채, "현재 vEgo 대비
+            # 충분히 급한 커브인가"를 추가로 검사한다. apex_speed가
+            # vEgo의 ROUTE_SEVERITY_GATE_RATIO(0.70) 이상이면 후보에서
+            # 제외 -- vEgo가 비정상적으로 낮거나 0에 가까울 때 기준이
+            # 붕괴하지 않도록 max(v_ego_kph, 1.0)로 하한을 둔다. 이
+            # 게이트로 candidates가 전부 걸러져도 별도 분기를 새로 만들지
+            # 않고 아래 `if not candidates:`(기존 "감속 필요 지점 없음",
+            # 즉 직선 취급) 분기를 그대로 재사용한다(§27 최소변경).
+            candidates = [
+                k for k in candidates
+                if speeds[k] < max(v_ego_kph, 1.0) * ROUTE_SEVERITY_GATE_RATIO
+            ]
             # [223차, design doc §5] 여러 후보 중 가장 가까운 유효 curve 1개만
             # 선택 -- 기존 candidates[0] 방식(179/196차) 그대로 재사용
             # (STEP1 KEEP 확정). 감속 필요 지점이 하나도 없으면(전부 직선)
@@ -917,9 +947,9 @@ class CarrotMan:
                 self.carrot_serv.route_apex_dist = apex_dist
                 self.carrot_serv.route_apex_speed = apex_speed
 
-                v_ego_ms = self.sm['carState'].vEgo
-                v_ego_kph = v_ego_ms * 3.6
-
+                # [237차] v_ego_ms/v_ego_kph는 위 severity gate에서 이미
+                # 계산됨(중복 계산 제거, §27) -- 아래 로직은 동일 함수
+                # 스코프 내 그 값을 그대로 사용한다.
                 if self.route_active and apex_dist <= ROUTE_APEX_REACHED_DIST_M:
                     # [223차, design doc §10] apex 도달 -- 즉시 RELEASE, 2초 hold 시작.
                     self.route_active = False
