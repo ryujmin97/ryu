@@ -971,6 +971,7 @@ private:
 
     int nGoPosDist = 0;
     int nGoPosTime = 0;
+    int nVTurnSpeed = 0; // [243차] TBT HUD route= 아래줄 vturn= 표시용
 
     QString szSdiDescr = "";
     QString atc_type;
@@ -1255,6 +1256,12 @@ protected:
         }
 
         // 우측: 도착예정시간 + 잔여거리 (세로 2줄, 폭 축소에 맞춰 폰트 40 -> 32)
+        // [243차, 사용자 지시] 기존엔 1줄에 "도착: 37.1분(10:33)"을 전부 넣어
+        // 폭 초과 시 시각(HH:MM)이 잘려 보이는 문제가 있었음. 잔여거리와
+        // 표시 순서를 바꿔 1줄엔 "도착: 잔여거리"만, 2줄엔 잔여시간(분)+
+        // 도착시각(HH:MM)을 배치 -> 2줄엔 라벨이 없어 폭 여유가 생겨 시각이
+        // 잘리지 않음. 두 줄 전체를 한 줄(TBT_LINE_STEP=40)만큼 위로 이동해
+        // 그 아래 도로명/route 블록과의 기존 간격(80px)은 그대로 유지.
         nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
         int info_x = tbt_x + 175;
         if (nGoPosDist > 0 && nGoPosTime > 0) {
@@ -1264,10 +1271,12 @@ protected:
             local->tm_min += remaining_minutes;
             mktime(local);
             bool is_kor = s->language == "main_ko";
-            sprintf(str, "%s: %.1f%s(%02d:%02d)", (is_kor)?"도착":"ETA", (float)nGoPosTime / 60., (is_kor)?"분":"MIN", local->tm_hour, local->tm_min);
+            // 1줄: "도착 : 48.2km" (라벨 + 잔여거리)
+            sprintf(str, "%s : %.1f%s", (is_kor)?"도착":"ETA", nGoPosDist / 1000. * ((s->scene.is_metric)?1:KM_TO_MILE), (s->scene.is_metric) ? "km" : "mile");
+            ui_draw_text(s, info_x, tbt_y + 35, str, FS(30), COLOR_WHITE, BOLD);
+            // 2줄: "37.1분(10:33)" (라벨 없이 잔여시간+도착시각만, 폭 여유 확보)
+            sprintf(str, "%.1f%s(%02d:%02d)", (float)nGoPosTime / 60., (is_kor)?"분":"MIN", local->tm_hour, local->tm_min);
             ui_draw_text(s, info_x, tbt_y + 75, str, FS(30), COLOR_WHITE, BOLD);
-            sprintf(str, "%.1f%s", nGoPosDist / 1000. * ((s->scene.is_metric)?1:KM_TO_MILE), (s->scene.is_metric) ? "km" : "mile");
-            ui_draw_text(s, info_x, tbt_y + 115, str, FS(30), COLOR_WHITE, BOLD);
         }
 
         // 하단: 과속카메라 안내(szSdiDescr) 또는 도로명(szPosRoadName), 전체 폭 사용
@@ -1306,13 +1315,16 @@ protected:
           // 박스가 위로 커져 있어 전부 표시됨(그래도 넘치면 폰트 20까지 축소,
           // 최후에는 잘림 감수 — 128차 이후 기존 정책과 동일).
 
-          // 1줄(들): 도로명, 우측끝 정렬. 마지막 줄이 기존과 동일한 y(tbt_y+195)에
-          // 오도록 하고, 추가된 줄은 그 위(TBT_LINE_STEP 간격)로 쌓는다.
+          // [243차, 사용자 지시] 도로명/route= 블록 전체를 한 줄(TBT_LINE_STEP=40)
+          // 위로 이동(195->155). 비워진 기존 route 위치(235)는 아래 vturn=
+          // 줄이 그대로 이어받아 박스 하단(tbt_y+280) 기준 여백은 변경 없음.
+          // 1줄(들): 도로명, 우측끝 정렬. 마지막 줄이 tbt_y+155에 오도록 하고,
+          // 추가된 줄은 그 위(TBT_LINE_STEP 간격)로 쌓는다.
           if (!name_wrapped.empty()) {
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             int n = (int)name_wrapped.size();
             for (int i = 0; i < n; i++) {
-              int line_y = tbt_y + 195 - (n - 1 - i) * TBT_LINE_STEP;
+              int line_y = tbt_y + 155 - (n - 1 - i) * TBT_LINE_STEP;
               ui_draw_text(s, right_x, line_y, name_wrapped[i].c_str(), name_fs, COLOR_WHITE, BOLD);
             }
           }
@@ -1323,14 +1335,15 @@ protected:
           // [232차, 사용자 지시] 154/156차 이후 유지되던 "숫자 = prefix의 2배" 비율을
           // 폐지. 숫자도 박스 안 다른 텍스트와 동일한 크기(FS(26))로 통일하고,
           // 강조는 색상(초록)만으로 유지한다.
+          // [243차, 사용자 지시] y좌표 235->195로 한 줄 위로 이동(위 도로명 블록과 동일 폭).
+          const int fs_prefix = FS(26);   // [231차] 전체 스케일(1.3x) 적용, route=/vturn= 공통 사용
           if (name_line2.length() > 0) {
             size_t eq = name_line2.find('=');
             std::string prefix = (eq == std::string::npos) ? name_line2 : name_line2.substr(0, eq + 1); // "route="
             std::string number = (eq == std::string::npos) ? "" : name_line2.substr(eq + 1);            // "145.1"
 
-            const int fs_prefix = FS(26);   // [231차] 전체 스케일(1.3x) 적용
             const int fs_number = fs_prefix; // [232차] prefix와 동일 크기로 통일(기존 2배 비율 폐지), 색상만 초록으로 강조
-            float line2_y = tbt_y + 235;      // 박스 하단쪽 절대좌표, 줄바꿈 여부와 무관하게 고정
+            float line2_y = tbt_y + 195;      // [243차] 235->195 (한 줄 위로 이동)
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             float number_w = 0;
@@ -1345,6 +1358,27 @@ protected:
             if (prefix.length() > 0) {
               ui_draw_text(s, right_x - number_w, line2_y, prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
             }
+          }
+
+          // [243차, 사용자 지시 신규] route= 아래줄에 같은 크기(FS(26))/동일
+          // 우측끝(right_x) 정렬로 "vturn=<값>" 추가. route= 줄이 비운 기존
+          // y좌표(235)를 그대로 사용 -> 박스 하단 여백(45px) 기존과 동일.
+          // vTurnSpeed는 carrotMan capnp 필드(cereal/custom.capnp)를 통해
+          // carrot_serv.py에서 매 프레임 전달되는 실측값(단위: km/h로 취급).
+          {
+            char vturn_str[32];
+            sprintf(vturn_str, "%d", nVTurnSpeed);
+            std::string vt_prefix = "vturn=";
+            float line3_y = tbt_y + 235; // route=가 235->195로 옮기며 비운 자리
+
+            nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+            nvgFontSize(s->vg, fs_prefix);
+            nvgFontFace(s->vg, BOLD);
+            float bounds[4];
+            nvgTextBounds(s->vg, 0, 0, vturn_str, NULL, bounds);
+            float vt_number_w = bounds[2] - bounds[0];
+            ui_draw_text(s, right_x, line3_y, vturn_str, fs_prefix, COLOR_GREEN, BOLD);
+            ui_draw_text(s, right_x - vt_number_w, line3_y, vt_prefix.c_str(), fs_prefix, COLOR_WHITE, BOLD);
           }
         }
 
@@ -1375,6 +1409,7 @@ public:
         xTurnInfo = carrot_man.getXTurnInfo();
         xDistToTurn = carrot_man.getXDistToTurn();
         nRoadLimitSpeed = carrot_man.getNRoadLimitSpeed();
+        nVTurnSpeed = carrot_man.getVTurnSpeed(); // [243차] TBT HUD vturn= 표시용
         if (active_carrot > 1 || carrot_man.getNGoPosDist() > 0) {
           atc_type = QString::fromStdString(carrot_man.getAtcType());
 
