@@ -177,6 +177,26 @@ ROUTE_CLUSTER_MAX_GAP_M = 40.0
 ROUTE_APEX_MISS_TOLERANCE_FRAMES = 3
 CONTINUITY_MATCH_TOLERANCE_M = 10.0
 
+# [266차, devnotes WIP.md 265차 design -- 264차 confidence 신호 4종 검증
+# 트랙 확정(persistence 단독 채택) 이후 실 patch] apex_speed 소비 지점(아래
+# carrot_navi_route() target_ms 계산) 직전에 streak 기반 신뢰도로 apex_speed와
+# v_ego_kph를 블렌드해, streak=1(이번 프레임 처음 확인된 미검증 후보)의
+# 순간적 개입을 억제하고 streak가 쌓일수록 정상 개입으로 수렴시킨다.
+# confidence(streak)=1-exp(-(streak-1)/TAU): streak=1 -> 0.0(개입 없음),
+# streak=6 -> ~0.55, streak=20 -> ~0.95. TAU 근거는 devnotes
+# toolkit/sim_route_265_confidence_target_blend.py self-test 및
+# PARAMS_REGISTRY.md 참고(NEEDS_VALIDATION -- 실 corpus 재검증 전).
+CONFIDENCE_TAU = 6.3
+
+
+def _route_confidence_from_streak(streak, tau=CONFIDENCE_TAU):
+  # streak<=1(신규/미검증 후보)이면 정확히 0.0 반환 -- math.exp 호출 자체를
+  # 생략해 streak=0(추적 대상 없음) 등 경계값에서도 안전하다.
+  if streak <= 1:
+    return 0.0
+  return 1.0 - math.exp(-(streak - 1) / tau)
+
+
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
 def haversine(lon1, lat1, lon2, lat2):
@@ -526,6 +546,10 @@ class CarrotMan:
     self._route_cluster_locked_dist = None
     self._route_cluster_locked_speed = None
     self._route_cluster_miss_frames = 0
+    # [266차, devnotes WIP.md 265차 design] persistence(streak) 기반
+    # confidence blend용 streak 카운터 -- locked_dist/speed/miss_frames와
+    # 항상 함께 초기화/리셋된다(아래 모든 mirror 지점 동일).
+    self._route_cluster_streak = 0
 
     self.active_carrot_last = False
 
@@ -683,7 +707,10 @@ class CarrotMan:
       self._route_cluster_locked_dist = distances[matched]
       self._route_cluster_locked_speed = speeds[matched]
       self._route_cluster_miss_frames = 0
-      return matched, self._route_cluster_locked_dist, self._route_cluster_locked_speed, "matched"
+      # [266차, devnotes WIP.md 265차 design/260차 streak 정의] matched된
+      # 프레임에서만 streak 증가 -- held는 유지, new/passed/lost는 1로 리셋.
+      self._route_cluster_streak += 1
+      return matched, self._route_cluster_locked_dist, self._route_cluster_locked_speed, "matched", self._route_cluster_streak
 
     # [255차, 254차 design/6-state 분리] lock이 풀리는 사유를 "passed"
     # (predicted<=0, locked apex를 실제로 지나침)와 "lost"(miss_frames
@@ -703,7 +730,9 @@ class CarrotMan:
         if (self._route_cluster_miss_frames < ROUTE_APEX_MISS_TOLERANCE_FRAMES
             and predicted is not None and predicted > 0):
           self._route_cluster_locked_dist = predicted
-          return -1, predicted, self._route_cluster_locked_speed, "held"
+          # [266차] held는 실제 후보 재확인이 아니므로 streak 유지(증가도
+          # 리셋도 하지 않음).
+          return -1, predicted, self._route_cluster_locked_speed, "held", self._route_cluster_streak
         reset_reason = "lost"
       self._route_cluster_locked_dist = None
       self._route_cluster_locked_speed = None
@@ -714,9 +743,12 @@ class CarrotMan:
       self._route_cluster_locked_dist = distances[idx]
       self._route_cluster_locked_speed = speeds[idx]
       self._route_cluster_miss_frames = 0
-      return idx, distances[idx], speeds[idx], (reset_reason or "new")
+      # [266차] new/passed/lost 재탐색 성공 시 streak 1로 리셋(신규 미검증 후보).
+      self._route_cluster_streak = 1
+      return idx, distances[idx], speeds[idx], (reset_reason or "new"), self._route_cluster_streak
 
-    return -1, None, None, (reset_reason or "none")
+    self._route_cluster_streak = 0
+    return -1, None, None, (reset_reason or "none"), self._route_cluster_streak
 
   def carrot_navi_route(self):
 
@@ -780,6 +812,7 @@ class CarrotMan:
       self._route_cluster_locked_dist = None
       self._route_cluster_locked_speed = None
       self._route_cluster_miss_frames = 0
+      self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
       # [229차, ChatGPT 228차 코드리뷰 지적 검증+수정] 이 조기 return은 함수
       # 말미의 유일한 carrot_serv mirror 지점에 도달하지 못해, mode 0/1로
       # 머무는 동안 carrot_serv.route_active가 직전 프레임 값에 stale하게
@@ -826,6 +859,7 @@ class CarrotMan:
       self._route_cluster_locked_dist = None
       self._route_cluster_locked_speed = None
       self._route_cluster_miss_frames = 0
+      self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
       # [229차, 위 mode 0/1 분기와 동일 이유] 이 조기 return도 함수 말미의
       # 유일한 mirror 지점을 건너뛰므로 여기서도 명시적으로 mirror한다.
       self.carrot_serv.route_active = self.route_active
@@ -1040,7 +1074,7 @@ class CarrotMan:
             # mode: 'matched'/'held'/'new'/'none'.
             clusters = route_find_clusters(candidates, distances,
                                             ROUTE_CLUSTER_MIN_POINTS, ROUTE_CLUSTER_MAX_GAP_M)
-            apex_idx, apex_dist, apex_speed, apex_mode = self._route_cluster_continuity_step(
+            apex_idx, apex_dist, apex_speed, apex_mode, apex_streak = self._route_cluster_continuity_step(
                 clusters, distances, speeds, v_ego_ms)
 
             if apex_mode == "none" or apex_speed is None:
@@ -1109,7 +1143,17 @@ class CarrotMan:
                         # "route가 vEgo를 초과 명령"/"자기참조적 고착" 두
                         # 회귀의 재발 여지를 원천 차단한다(§4 "Route가 현재
                         # 속도보다 높은 속도를 명령해서는 안 된다" 그대로 구현).
-                        target_ms = apex_speed / 3.6
+                        # [266차, devnotes WIP.md 265차 design] streak 기반
+                        # confidence로 apex_speed와 v_ego_kph를 블렌드한 뒤
+                        # target_ms를 계산 -- ACTIVE/INERT 상태기계·게이트
+                        # 판정식 자체는 완전히 그대로 유지(§27 최소변경,
+                        # 삽입지점은 apex_speed 소비 지점 단 한 곳). RELEASE
+                        # 판정(speed_reached, 위)은 사용자 확정(265차)에 따라
+                        # 블렌드 전 원래 apex_speed를 그대로 사용하므로 이
+                        # 삽입 지점보다 앞서 이미 계산이 끝나 영향 없음.
+                        apex_confidence = _route_confidence_from_streak(apex_streak)
+                        eff_apex_speed = apex_confidence * apex_speed + (1.0 - apex_confidence) * v_ego_kph
+                        target_ms = eff_apex_speed / 3.6
                         eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
                         if eff_dist <= 0 or v_ego_ms <= target_ms:
                             out_speed_ms = v_ego_ms
@@ -1135,7 +1179,13 @@ class CarrotMan:
                     # 미충족 시 out_speed=None으로 route를 arbitration에서
                     # 완전히 제외한다(§4 "가속 명령 생성 금지"는 애초에
                     # None이 아무 명령도 내지 않으므로 자동 충족).
-                    target_ms = apex_speed / 3.6
+                    # [266차, devnotes WIP.md 265차 design] 위 ACTIVE 분기와
+                    # 동일한 confidence blend를 INERT 게이트 판정에도 적용
+                    # (apex_speed 소비 지점은 STEP2/게이트 공통으로 이 두
+                    # 곳뿐 -- 265차 설계 확인).
+                    apex_confidence = _route_confidence_from_streak(apex_streak)
+                    eff_apex_speed = apex_confidence * apex_speed + (1.0 - apex_confidence) * v_ego_kph
+                    target_ms = eff_apex_speed / 3.6
                     eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
                     if v_ego_ms <= target_ms:
                         # [257차] 이미 target 이하 -- 감속 자체가 무의미하므로
@@ -1195,6 +1245,7 @@ class CarrotMan:
             self._route_cluster_locked_dist = None
             self._route_cluster_locked_speed = None
             self._route_cluster_miss_frames = 0
+            self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
     else:
         resampled_points = []
         resampled_distances = []
@@ -1212,6 +1263,7 @@ class CarrotMan:
             self._route_cluster_locked_dist = None
             self._route_cluster_locked_speed = None
             self._route_cluster_miss_frames = 0
+            self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
         #self.params.remove("NavDestination")
 
     # [227차] carrot_serv.py::update_navi()가 ACTIVE 추적 분기(vEgo 상한
