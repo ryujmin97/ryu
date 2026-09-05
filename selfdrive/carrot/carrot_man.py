@@ -133,6 +133,15 @@ ROUTE_MAX_SPEED_KPH = 150.0
 # 사실상 apex 지점 그 자체로 봐도 무방하다(그리드 해상도 한계).
 ROUTE_APEX_REACHED_DIST_M = 10.0
 
+# [245차, apex flicker debounce, FINDINGS.md 245차] candidate가 1프레임만
+# 사라져도 즉시 RELEASE(+2초 hold)가 걸려 "서서히 접근하는 커브"에서
+# 후보가 severity gate 근처를 넘나들 때마다 apex가 반복적으로 뛰는 것처럼
+# 보이는 flicker의 근본원인이었다(244차가 지목한 GPS/헤딩 노이즈 계열).
+# 실제 apex 도달(ROUTE_APEX_REACHED_DIST_M 이내, 966행)로 인한 RELEASE는
+# 대상이 아니며 기존대로 즉시 처리한다 -- 이 상수는 "candidate가 아예
+# 사라진(직선 재분류)" 경우에만 적용된다. 20Hz 기준 8프레임=~0.4s.
+ROUTE_RELEASE_CONFIRM_FRAMES = 8
+
 # [223차, 신규] Route RELEASE 이후 완전 OFF를 유지하는 시간(design doc
 # §11/§12) -- curve A apex 직후 curve B가 즉시 감지되어 route가 바로
 # 재부착되는 현상을 막기 위한 목적. 사용자 설계문서 지시값 그대로(2초).
@@ -490,6 +499,10 @@ class CarrotMan:
     # 밀어올리는 회귀가 재발하지 않는다(FINDINGS.md 228차 "2차 버그").
     self.route_inert = False
     self.route_release_time = None
+    # [245차, apex flicker debounce] candidate가 연속으로 몇 프레임째
+    # 사라져 있는지 세는 카운터 -- ROUTE_RELEASE_CONFIRM_FRAMES 미만이면
+    # RELEASE를 확정하지 않는다(위 상수 정의부 주석 참고).
+    self._route_candidate_lost_frames = 0
 
     self.active_carrot_last = False
 
@@ -615,6 +628,31 @@ class CarrotMan:
         time.sleep(1)
 
   
+  def _route_compute_apex_out_speed(self, v_ego_ms, apex_dist, apex_speed):
+    # [245차, apex flicker debounce 전용] candidate가 일시적으로 사라진
+    # debounce 대기 프레임에서 "마지막으로 확인된 apex"를 그대로 유지하며
+    # 감속을 이어가기 위한 헬퍼. carrot_navi_route() 본문의 228차
+    # route_inert v2 3분기(eff_dist<=0 / far-inert / 실제 감속)와 동일한
+    # 공식을 그대로 사용한다. 검증이 끝난 본문 블록(228/224/223차)은
+    # 회귀 위험을 피하기 위해 건드리지 않고(§27), 이 debounce 전용
+    # 경로만 별도 함수로 분리했다 -- 두 곳의 공식이 향후 어긋나지 않도록
+    # 수식을 변경할 때는 반드시 이 함수와 carrot_navi_route() 본문을
+    # 함께 갱신해야 한다(FINDINGS.md 245차에 명시).
+    target_ms = apex_speed / 3.6
+    eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
+    if eff_dist <= 0:
+      out_speed_ms = v_ego_ms
+      self.route_inert = False
+    elif v_ego_ms <= target_ms:
+      out_speed_ms = target_ms
+      self.route_inert = True
+    else:
+      required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
+      applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
+      out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
+      self.route_inert = False
+    return out_speed_ms * 3.6
+
   def carrot_navi_route(self):
 
     # [193차] route apex 진단값은 매 호출마다 초기화한다.
@@ -673,6 +711,10 @@ class CarrotMan:
       # 동안 stale True가 남아 carrot_serv 클램프 판정을 오염시키지 않도록.
       self.route_inert = False
       self.route_release_time = None
+      # [245차] mode 0/1 전환 시 flicker debounce 카운터도 함께 초기화 --
+      # 다음 2/3 재전환 시 이전 세션의 잔여 카운트가 새 추적을 오염시키지
+      # 않도록.
+      self._route_candidate_lost_frames = 0
       # [229차, ChatGPT 228차 코드리뷰 지적 검증+수정] 이 조기 return은 함수
       # 말미(1039/1045행)의 유일한 carrot_serv mirror 지점에 도달하지 못해,
       # mode 0/1로 머무는 동안 carrot_serv.route_active/route_inert가 직전
@@ -718,6 +760,8 @@ class CarrotMan:
       # [228차] navi 비활성으로 인한 즉시 해제 시에도 route_inert를
       # 함께 초기화(위 mode 0/1 분기와 동일 이유).
       self.route_inert = False
+      # [245차] 위와 동일 이유로 flicker debounce 카운터도 초기화.
+      self._route_candidate_lost_frames = 0
       # [229차, 위 mode 0/1 분기와 동일 이유] 이 조기 return도 함수 말미의
       # 유일한 mirror 지점을 건너뛰므로 여기서도 명시적으로 mirror한다.
       self.carrot_serv.route_active = self.route_active
@@ -940,15 +984,36 @@ class CarrotMan:
             if not candidates:
                 # [223차] 직선 -- 감속 필요 지점 없음. ACTIVE 중이었다면
                 # (예: 후보가 사라짐 == 사실상 통과) 즉시 RELEASE+hold 시작.
+                # [245차, apex flicker debounce, FINDINGS.md 245차] 단,
+                # 후보 소실이 실제로 "통과"인지 severity gate 경계의 순간
+                # 노이즈인지 이 프레임만으로는 구분할 수 없다. 연속
+                # ROUTE_RELEASE_CONFIRM_FRAMES 프레임(~0.4s) 동안 계속
+                # 사라져 있어야 RELEASE를 확정한다. 그 전까지는 마지막으로
+                # 확인된 apex(_route_apex_idx/dist/speed)를 그대로 재사용해
+                # 이번 프레임 감속을 유지한다 -- apex_dist는 갱신하지 않으므로
+                # (§27 최소변경, 새 거리 재계산 로직 추가 안 함) 짧은 debounce
+                # 구간 동안 소폭 보수적(실제보다 약간 먼 거리 취급)이다.
                 if self.route_active:
-                    self.route_active = False
-                    # [228차] candidate 소실로 인한 RELEASE 시 route_inert도
-                    # 함께 해제 -- ACTIVE 추적이 끝났으므로 far-inert 마킹이
-                    # 남아있으면 다음 진입 프레임 판정을 오염시킬 수 있다.
-                    self.route_inert = False
-                    self.route_release_time = time.monotonic()
-                out_speed = None
+                    self._route_candidate_lost_frames += 1
+                    if self._route_candidate_lost_frames < ROUTE_RELEASE_CONFIRM_FRAMES:
+                        out_speed = self._route_compute_apex_out_speed(
+                            v_ego_ms, self._route_apex_dist, self._route_apex_speed)
+                    else:
+                        self.route_active = False
+                        # [228차] candidate 소실로 인한 RELEASE 시 route_inert도
+                        # 함께 해제 -- ACTIVE 추적이 끝났으므로 far-inert 마킹이
+                        # 남아있으면 다음 진입 프레임 판정을 오염시킬 수 있다.
+                        self.route_inert = False
+                        self.route_release_time = time.monotonic()
+                        self._route_candidate_lost_frames = 0
+                        out_speed = None
+                else:
+                    self._route_candidate_lost_frames = 0
+                    out_speed = None
             else:
+                # [245차] 후보가 다시 확인됐으므로 flicker debounce 카운터를
+                # 리셋한다(진짜 통과가 아니었음이 이번 프레임에 확정됨).
+                self._route_candidate_lost_frames = 0
                 apex_idx = candidates[0]
                 apex_dist = distances[apex_idx]
                 apex_speed = speeds[apex_idx]
@@ -1070,6 +1135,8 @@ class CarrotMan:
             self.route_active = False
             # [228차] 위와 동일 이유로 route_inert도 함께 해제.
             self.route_inert = False
+            # [245차] 위와 동일 이유로 flicker debounce 카운터도 초기화.
+            self._route_candidate_lost_frames = 0
     else:
         resampled_points = []
         resampled_distances = []
@@ -1084,6 +1151,8 @@ class CarrotMan:
             # [228차] lookahead 포인트 부족으로 인한 즉시 해제 시에도
             # route_inert를 함께 초기화(위 두 "즉시 해제" 분기와 동일 이유).
             self.route_inert = False
+            # [245차] 위와 동일 이유로 flicker debounce 카운터도 초기화.
+            self._route_candidate_lost_frames = 0
         #self.params.remove("NavDestination")
 
     # [227차] carrot_serv.py::update_navi()가 ACTIVE 추적 분기(vEgo 상한
