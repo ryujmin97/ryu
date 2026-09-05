@@ -1119,37 +1119,62 @@ class CarrotMan:
                             out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
                         out_speed = out_speed_ms * 3.6
                 else:
-                    # [247차 design doc §3] INERT -- 감속 시작 조건만 검사한다.
+                    # [257차 design, Master 최종 결정] INERT -- ACTIVE 진입
+                    # 조건을 "v_ego_ms > target_ms"(226차 이후 유지되던 조건,
+                    # 거리 무관 즉시 전환)에서 "지금부터 autoNaviSpeedDecelRate로
+                    # 등감속을 시작해도 apex에서 target에 정확히 도달하는 데
+                    # 필요한 거리(D_required) 이내로 apex_dist가 좁혀지는 순간"
+                    # (거리/감속능력 기반 게이트)으로 재정의한다. 246차
+                    # CRITICAL(원거리 apex에서 desiredSpeed가 vEgo에
+                    # 자기참조적으로 고정, vCruise 자유가속 억제)의 근본
+                    # 원인이 바로 이 "즉시 ACTIVE 전환" 조건 자체였음이 257차
+                    # 시뮬레이션(폐루프, 246차 원 실측 수치 재현)으로 확인됨
+                    # (devnotes FINDINGS.md 246차/257차 참고). 226차가 도입한
+                    # out_speed=apex_speed ceiling(아래 옛 로직 마지막 분기)은
+                    # 이 재설계로 Master가 논쟁 자체를 폐기, 신규 게이트
+                    # 미충족 시 out_speed=None으로 route를 arbitration에서
+                    # 완전히 제외한다(§4 "가속 명령 생성 금지"는 애초에
+                    # None이 아무 명령도 내지 않으므로 자동 충족).
                     target_ms = apex_speed / 3.6
                     eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
-                    if eff_dist <= 0:
-                        # [224차 의도 계승] apex가 이미 너무 가까워 지금부터
-                        # 등감속을 새로 시작하는 것 자체가 무의미 -- vEgo를
-                        # 그대로 통과시킨다(개입 없음, INERT 유지).
+                    if v_ego_ms <= target_ms:
+                        # [257차] 이미 target 이하 -- 감속 자체가 무의미하므로
+                        # 항상 INERT(None) 유지. 226차 ceiling(out=apex_speed)은
+                        # Master 결정으로 폐기(257차 시뮬레이션: 동적 재평가
+                        # 구조이므로 이후 v_ego가 target을 넘어도 아래 게이트가
+                        # 매 프레임 재계산돼 안전).
+                        out_speed = None
+                    elif eff_dist <= 0:
+                        # [224차 원 의도 계승, 257차 Master 확인] apex가 이미
+                        # 너무 가까워 지금부터 새로 등감속을 시작하는 것 자체가
+                        # 무의미 -- vEgo를 그대로 통과시킨다(강제 ACTIVE 진입
+                        # 없음, INERT 유지). 정상 경로에서는 아래 게이트가
+                        # 먼저 발동하므로 이 분기는 244차류 flicker로 apex
+                        # 후보가 불연속적으로 근거리에 나타나는 예외 상황에서만
+                        # 도달한다 -- 그런 노이즈성 후보에 갑작스러운 급감속을
+                        # 새로 걸지 않기 위해 224차 원래 설계를 그대로 계승.
                         out_speed = v_ego_kph
-                    elif v_ego_ms > target_ms:
-                        # [247차 design doc §3] 지금부터 감속해야 함 -> ACTIVE
-                        # 진입. 진입 프레임부터 바로 §4 감속식을 적용한다
-                        # (진입 게이트와 감속 시작을 같은 프레임에 처리해도
-                        # eff_dist>0 && v_ego>target 보장되므로 안전).
-                        self.route_active = True
-                        required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
-                        applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
-                        out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
-                        out_speed = out_speed_ms * 3.6
                     else:
-                        # [226차 유지, "Route 감속 다음 설계 방향" + ChatGPT
-                        # 225차 정적점검] 아직 감속을 시작할 필요는 없지만
-                        # (v_ego_ms<=target_ms), out_speed=None이면 route가
-                        # arbitration에서 완전히 빠져 vCruise 등 다른 소스가
-                        # desired_speed를 apex_speed 위로 밀어올릴 수 있다
-                        # (예: vEgo=60/apex=80/vCruise=100 -> 100까지 개방).
-                        # out_speed=apex_speed로 두어 route를 min() 후보로
-                        # 남긴다 -- min()은 위로 밀어올리지 않으므로 "가속
-                        # 명령 생성 금지"(§4)는 보장되면서 apex_speed ceiling만
-                        # 유지된다. route_active는 그대로 False(추적 시작
-                        # 아님, hold 없음, 이 줄 외 다른 상태 변경 없음).
-                        out_speed = apex_speed
+                        # [257차] D_required=(v_ego^2-target^2)/(2*a_fixed)
+                        # 게이트 -- a_fixed는 실제 감속 상한
+                        # autoNaviSpeedDecelRate를 그대로 재사용(Master 확인
+                        # 완료: 별도 상수 신설 없음). required_decel_mss가
+                        # 이 상수 이상이 되는 첫 프레임에만 ACTIVE 진입,
+                        # 그 즉시 required_decel_mss==decel_cap이 되어
+                        # 감속 시작이 불연속 없이 매끄럽게 이어진다.
+                        required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
+                        if required_decel_mss >= self.carrot_serv.autoNaviSpeedDecelRate:
+                            self.route_active = True
+                            applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
+                            out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
+                            out_speed = out_speed_ms * 3.6
+                        else:
+                            # 아직 게이트 미충족 -- D_required > apex_dist,
+                            # 즉 지금 당장 등감속을 시작하지 않아도 apex에서
+                            # target 도달이 가능한 여유가 남아있음. INERT
+                            # 유지(None), vCruise 등 상위 소스의 자유가속을
+                            # 막지 않는다(246차 CRITICAL 해소의 핵심).
+                            out_speed = None
 
             # [223차] out_speed(제어입력)가 실제 계산됐을 때만 텔레메트리를
             # 그 값으로 갱신 -- None(비활성/개입없음)이면 함수 진입부에서
