@@ -126,52 +126,42 @@ ROUTE_CURVATURE_FINE_SAMPLE = 1
 # 보존됨(§24, 삭제하지 않음).
 ROUTE_MAX_SPEED_KPH = 150.0
 
-# [223차, 신규] Route ACTIVE 상태에서 apex(감속목표지점)까지 남은 거리가
-# 이 값 이하로 줄어들면 "도달"로 간주해 즉시 RELEASE한다(design doc §10).
-# distance_interval(=10.0, 아래 carrot_navi_route() 내 리샘플 간격)과 동일
-# 값 -- 리샘플 그리드 특성상 이보다 촘촘하게 판정할 수 없고, 이 값 미만은
-# 사실상 apex 지점 그 자체로 봐도 무방하다(그리드 해상도 한계).
-ROUTE_APEX_REACHED_DIST_M = 10.0
-
-# [245차, apex flicker debounce, FINDINGS.md 245차] candidate가 1프레임만
-# 사라져도 즉시 RELEASE(+2초 hold)가 걸려 "서서히 접근하는 커브"에서
-# 후보가 severity gate 근처를 넘나들 때마다 apex가 반복적으로 뛰는 것처럼
-# 보이는 flicker의 근본원인이었다(244차가 지목한 GPS/헤딩 노이즈 계열).
-# 실제 apex 도달(ROUTE_APEX_REACHED_DIST_M 이내, 966행)로 인한 RELEASE는
-# 대상이 아니며 기존대로 즉시 처리한다 -- 이 상수는 "candidate가 아예
-# 사라진(직선 재분류)" 경우에만 적용된다. 20Hz 기준 8프레임=~0.4s.
-ROUTE_RELEASE_CONFIRM_FRAMES = 8
+# [247차/251차, INERT/ACTIVE 래치 재설계 -- design/247cha_route_inert_active_
+# redesign.md] 223차 ROUTE_APEX_REACHED_DIST_M 기반 거리조기해제(§8)와
+# 245차 ROUTE_RELEASE_CONFIRM_FRAMES 카운터 debounce(§8)는 아래
+# CONTINUITY_MATCH_TOLERANCE_M/ROUTE_APEX_MISS_TOLERANCE_FRAMES 기반
+# apex continuity 추적(§10)으로 대체되며 삭제됐다(251차, 실차 corpus
+# `0000039a--7b602ffb85` seg12-16으로 대체 검증 완료 -- devnotes WIP.md
+# 251차 참고, 터널/IC gore/S커브 3구간 전부 flicker 0건 재현).
 
 # [223차, 신규] Route RELEASE 이후 완전 OFF를 유지하는 시간(design doc
-# §11/§12) -- curve A apex 직후 curve B가 즉시 감지되어 route가 바로
+# §6/§11/§12) -- curve A apex 직후 curve B가 즉시 감지되어 route가 바로
 # 재부착되는 현상을 막기 위한 목적. 사용자 설계문서 지시값 그대로(2초).
 ROUTE_RELEASE_HOLD_S = 2.0
 
-# [237차, 신규] Route severity gate -- apex 후보로 인정할 커브의 최소
-# "심각도" 기준. 235/236차 실측(seg12-16 로그, devnotes WIP.md 235/236차)
-# 으로 확정된 설계: 후보 apex_speed가 현재 vEgo의 이 비율 이상이면(=이미
-# 충분히 완만해 별도 사전감속이 불필요하거나, vturn이 그 시점 vEgo/곡률로
-# 충분히 커버 가능한 수준) route apex 후보에서 제외한다.
-# relative_speed_ratio = apex_speed / max(vEgo_kph, 1.0) >= 이 값이면 skip.
-# 기준은 nRoadLimitSpeed가 아니라 vEgo(234차 계속9/10에서 재확정, 계속6의
-# nRoadLimitSpeed 기준안은 오류로 정정됨 -- FINDINGS.md 234차 참고).
-# toolkit/sim_route_234_spatial_apex_continuity.py(234차 계속4~10,
-# 237차에 재확인)로 seg12-16 로그(5999행) 기준 stage0(172건)->stage1(60건)
-# 프레임간 apex 점프(>40m) 감소를 사전검증함(§31 실차 patch 전 필수 검증
-# 절차 준수). 실차 검증은 이 패치 적용 전까지 미실시.
-#
-# [242차, 정정] 239차에서 이 게이트가 매 프레임 라이브 vEgo로 재평가되어
-# candidate가 target/RATIO 근방에서 자기 자신을 소거(self-elimination)하고
-# 재가속->재게이트통과->재감속을 반복하는 리밋사이클 진동을 만든다는
-# CRITICAL 구조적 결함이 확인됨(FINDINGS.md 239차 참고). 이 구조 자체는
-# RATIO 값과 무관하게 남아있음 -- 값을 올리면 진폭만 줄어든다
-# (평형속도 ≈ target*(1/RATIO)). 0.70일 때 +43%, 0.90일 때 +11% 근방으로
-# 진동 폭을 완화하는 잠정 조치. 240/241차의 route->vturn 자연 핸드오프
-# 실측(vEgo>=30kph, n=3, ratio 0.932~0.966)이 0.9 근방과 유사한 것을
-# 참고했으나 표본 부족(§28)으로 확정값 아님 -- 사용자 지시로 실차주행
-# 결과를 보며 나머지 검증(①~④, 239차 리밋사이클 실측 등)을 이어간다.
-# 실차 검증: 이 패치 기준으로 아직 미실시.
-ROUTE_SEVERITY_GATE_RATIO = 0.90
+# [247차, design doc §5] ACTIVE 해제 조건 중 하나 -- vEgo가 목표속도의 이
+# 비율 이하로 떨어지면(=사실상 목표속도 도달) 즉시 RELEASE한다. 나머지
+# 해제 조건(Apex 통과)은 아래 continuity 추적의 predicted_dist<=0으로
+# 판정(§10). 사용자 설계문서 원문 값(1.1) 그대로 채택, 별도 A/B 없음.
+ROUTE_ACTIVE_RELEASE_MARGIN_RATIO = 1.1
+
+# [247차 design doc §10 / 234차 계속4~10 원안, 251차 실차 corpus로 gate
+# 없이도 유효함 확정검증] Apex 후보 identity를 프레임 간 안정적으로
+# 유지하기 위한 2단계 추적 -- ①공간 클러스터링(stage2): 인접 후보끼리
+# gap<=ROUTE_CLUSTER_MAX_GAP_M이면 하나의 클러스터로 묶어(최소
+# ROUTE_CLUSTER_MIN_POINTS개 이상), 단발성 노이즈 후보 하나만으로 apex가
+# 성립하지 않도록 한다. ②예측거리 매칭 continuity(stage3): locked apex를
+# 매 프레임 vEgo*dt로 예측이동시키고, 이번 프레임 클러스터 중 예측위치와
+# CONTINUITY_MATCH_TOLERANCE_M 이내로 매칭되면 계속 추적. 매칭 실패해도
+# ROUTE_APEX_MISS_TOLERANCE_FRAMES 프레임까지는 예측값으로 hold, 초과
+# 시에만 lock 해제 후 재탐색. 값 근거는 toolkit/
+# sim_route_234_spatial_apex_continuity.py 상단 docstring 및 devnotes
+# WIP.md 234차 계속5~10/251차 참고(단일 route 기준 검증, §26 등록 시
+# devnotes PARAMS_REGISTRY.md 참고).
+ROUTE_CLUSTER_MIN_POINTS = 2
+ROUTE_CLUSTER_MAX_GAP_M = 40.0
+ROUTE_APEX_MISS_TOLERANCE_FRAMES = 3
+CONTINUITY_MATCH_TOLERANCE_M = 10.0
 
 # Haversine formula to calculate distance between two GPS coordinates
 #haversine_cache = {}
@@ -366,6 +356,24 @@ def calculate_curvature(p1, p2, p3):
     #curvature_cache[key] = curvature
     return curvature
 
+# [247차/251차, design doc §10] stage2 공간 클러스터링 -- idxs(거리
+# 오름차순 후보 인덱스)를 인접 gap<=max_gap_m인 런으로 묶는다.
+# toolkit/sim_route_234_spatial_apex_continuity.py::find_clusters()와
+# 동일 로직(234차 계속4 설계, 251차 실차 corpus로 재검증).
+def route_find_clusters(idxs, distances, min_points, max_gap_m):
+    if not idxs:
+        return []
+    clusters = []
+    cur = [idxs[0]]
+    for i in idxs[1:]:
+        if distances[i] - distances[cur[-1]] <= max_gap_m:
+            cur.append(i)
+        else:
+            clusters.append(cur)
+            cur = [i]
+    clusters.append(cur)
+    return [c for c in clusters if len(c) >= min_points]
+
 class CarrotMan:
   def __init__(self):
     print("************************************************CarrotMan init************************************************")
@@ -489,20 +497,21 @@ class CarrotMan:
     # §2)와 route_release_time(apex 도달 직후 RELEASE된 monotonic 시각,
     # None이면 hold 중이 아님, §11).
     self.route_active = False
-    # [228차, route_inert v2] route_active=True(ACTIVE 추적 중)이면서도
-    # "아직 거리는 남았지만 vEgo가 이미 target 이하"인 far-inert 프레임을
-    # 구분하기 위한 신규 상태(route_active와 동일한 mirroring 패턴, 아래
-    # carrot_navi_route() 3분기 및 carrot_serv 전달부 참고). apex 근접
-    # (eff_dist<=0) 구간은 여기 포함되지 않는다 -- 그 구간은 224차 의도대로
-    # route_inert=False로 남겨 carrot_serv.py의 vEgo 상한 클램프 경로를
-    # 그대로 태워야 floor(autoCurveSpeedLowerLimit)가 v_ego=0을 강제로
-    # 밀어올리는 회귀가 재발하지 않는다(FINDINGS.md 228차 "2차 버그").
-    self.route_inert = False
+    # [247차/251차, INERT/ACTIVE 래치 재설계] 228차 route_inert v2(far-inert
+    # 서브스테이트)는 삭제됐다 -- 새 ACTIVE 감속식(carrot_navi_route() 내
+    # eff_dist<=0/v_ego_ms<=target_ms 분기)이 항상 out=v_ego_ms(vEgo 그대로
+    # 통과)를 반환하도록 통합되어, out이 vEgo를 넘는 "target에 자기참조적으로
+    # 고정"되는 경로 자체가 구조적으로 존재하지 않는다(design doc §8 근거).
+    # carrot_serv.py 클램프도 route_inert 참조 없이 route_active만으로
+    # 단순화됨(§8, 아래 carrot_serv.py 동일 patch 참고).
     self.route_release_time = None
-    # [245차, apex flicker debounce] candidate가 연속으로 몇 프레임째
-    # 사라져 있는지 세는 카운터 -- ROUTE_RELEASE_CONFIRM_FRAMES 미만이면
-    # RELEASE를 확정하지 않는다(위 상수 정의부 주석 참고).
-    self._route_candidate_lost_frames = 0
+    # [247차/251차, design doc §10] apex continuity 추적기 상태(공간
+    # 클러스터링 + 예측거리 매칭) -- 245차 debounce
+    # (_route_candidate_lost_frames/ROUTE_RELEASE_CONFIRM_FRAMES)를 대체.
+    # locked_dist=None이면 추적 중인 apex 없음.
+    self._route_cluster_locked_dist = None
+    self._route_cluster_locked_speed = None
+    self._route_cluster_miss_frames = 0
 
     self.active_carrot_last = False
 
@@ -628,30 +637,59 @@ class CarrotMan:
         time.sleep(1)
 
   
-  def _route_compute_apex_out_speed(self, v_ego_ms, apex_dist, apex_speed):
-    # [245차, apex flicker debounce 전용] candidate가 일시적으로 사라진
-    # debounce 대기 프레임에서 "마지막으로 확인된 apex"를 그대로 유지하며
-    # 감속을 이어가기 위한 헬퍼. carrot_navi_route() 본문의 228차
-    # route_inert v2 3분기(eff_dist<=0 / far-inert / 실제 감속)와 동일한
-    # 공식을 그대로 사용한다. 검증이 끝난 본문 블록(228/224/223차)은
-    # 회귀 위험을 피하기 위해 건드리지 않고(§27), 이 debounce 전용
-    # 경로만 별도 함수로 분리했다 -- 두 곳의 공식이 향후 어긋나지 않도록
-    # 수식을 변경할 때는 반드시 이 함수와 carrot_navi_route() 본문을
-    # 함께 갱신해야 한다(FINDINGS.md 245차에 명시).
-    target_ms = apex_speed / 3.6
-    eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
-    if eff_dist <= 0:
-      out_speed_ms = v_ego_ms
-      self.route_inert = False
-    elif v_ego_ms <= target_ms:
-      out_speed_ms = target_ms
-      self.route_inert = True
-    else:
-      required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
-      applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
-      out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
-      self.route_inert = False
-    return out_speed_ms * 3.6
+  def _route_cluster_continuity_step(self, clusters, distances, speeds, v_ego_ms):
+    # [247차 design doc §10 / 234차 계속4~10 원안, 251차 실차 corpus 재검증]
+    # toolkit/sim_route_234_spatial_apex_continuity.py::ContinuityState.step()을
+    # 그대로 이식. locked apex를 매 프레임 v_ego_ms*dt로 예측이동시키고,
+    # 이번 프레임 클러스터 중 예측위치와 CONTINUITY_MATCH_TOLERANCE_M
+    # 이내로 매칭되면 계속 추적한다. predicted<=0(=locked apex를 이미
+    # 지나쳤을 것으로 예측됨)이면 매칭/hold 둘 다 시도하지 않고 즉시
+    # lock을 해제한다 -- design doc §5/§10이 정의하는 "Apex 통과" 판정이
+    # 바로 이 지점이다(호출부 carrot_navi_route()가 mode 전이로 감지).
+    # 반환: (idx, dist, speed, mode). mode: 'matched'(이번 프레임 실제
+    # 후보로 재확인)/'held'(순간 미스, 예측값으로 유지)/'new'(신규 진입 또는
+    # 이전 lock 해제 후 재탐색)/'none'(추적 대상 없음). 'held'는 실제
+    # 후보 인덱스가 없으므로 idx=-1.
+    dt = ROUTE_SPEED_LOOP_DT
+    predicted = (self._route_cluster_locked_dist - v_ego_ms * dt) if self._route_cluster_locked_dist is not None else None
+
+    matched = None
+    if predicted is not None and predicted > 0 and clusters:
+      best = None
+      best_err = None
+      for c in clusters:
+        idx = c[0]
+        err = abs(distances[idx] - predicted)
+        if best_err is None or err < best_err:
+          best, best_err = idx, err
+      if best_err is not None and best_err <= CONTINUITY_MATCH_TOLERANCE_M:
+        matched = best
+
+    if matched is not None:
+      self._route_cluster_locked_dist = distances[matched]
+      self._route_cluster_locked_speed = speeds[matched]
+      self._route_cluster_miss_frames = 0
+      return matched, self._route_cluster_locked_dist, self._route_cluster_locked_speed, "matched"
+
+    if self._route_cluster_locked_dist is not None:
+      self._route_cluster_miss_frames += 1
+      if (self._route_cluster_miss_frames < ROUTE_APEX_MISS_TOLERANCE_FRAMES
+          and predicted is not None and predicted > 0):
+        self._route_cluster_locked_dist = predicted
+        return -1, predicted, self._route_cluster_locked_speed, "held"
+      # tolerance 초과, 또는 predicted<=0(Apex 통과 추정) -- lock 해제.
+      self._route_cluster_locked_dist = None
+      self._route_cluster_locked_speed = None
+      self._route_cluster_miss_frames = 0
+
+    if clusters:
+      idx = clusters[0][0]
+      self._route_cluster_locked_dist = distances[idx]
+      self._route_cluster_locked_speed = speeds[idx]
+      self._route_cluster_miss_frames = 0
+      return idx, distances[idx], speeds[idx], "new"
+
+    return -1, None, None, "none"
 
   def carrot_navi_route(self):
 
@@ -707,23 +745,22 @@ class CarrotMan:
       # 매 호출마다 무조건 리셋하므로 mode가 0/1로 머무는 동안은 계속 초기
       # 상태 유지, 0/1 -> 2/3 재전환 시에도 잔여 상태 없이 새로 검색 시작(§18).
       self.route_active = False
-      # [228차] mode 0/1 전환 시 route_inert도 함께 초기화 -- 0/1로 머무는
-      # 동안 stale True가 남아 carrot_serv 클램프 판정을 오염시키지 않도록.
-      self.route_inert = False
       self.route_release_time = None
-      # [245차] mode 0/1 전환 시 flicker debounce 카운터도 함께 초기화 --
-      # 다음 2/3 재전환 시 이전 세션의 잔여 카운트가 새 추적을 오염시키지
-      # 않도록.
-      self._route_candidate_lost_frames = 0
+      # [247차/251차] route_inert 삭제에 맞춰, mode 0/1 전환 시 apex
+      # continuity 추적기 상태도 함께 초기화 -- 245차 debounce 카운터가
+      # 하던 것과 동일한 목적(다음 2/3 재전환 시 이전 세션의 잔여 lock이
+      # 새 추적을 오염시키지 않도록).
+      self._route_cluster_locked_dist = None
+      self._route_cluster_locked_speed = None
+      self._route_cluster_miss_frames = 0
       # [229차, ChatGPT 228차 코드리뷰 지적 검증+수정] 이 조기 return은 함수
-      # 말미(1039/1045행)의 유일한 carrot_serv mirror 지점에 도달하지 못해,
-      # mode 0/1로 머무는 동안 carrot_serv.route_active/route_inert가 직전
-      # 프레임 값에 stale하게 고정될 수 있었다(현재는 route_speed=None이라
-      # carrot_serv.py의 클램프 블록 자체가 스킵되어 즉시 차량 거동에 영향은
-      # 없으나, 향후 이 두 필드를 다른 로직이 참조하면 회귀 소지 -- FINDINGS.md
-      # 229차). route_active/route_inert와 동일한 mirroring 패턴을 여기도 적용.
+      # 말미의 유일한 carrot_serv mirror 지점에 도달하지 못해, mode 0/1로
+      # 머무는 동안 carrot_serv.route_active가 직전 프레임 값에 stale하게
+      # 고정될 수 있었다(현재는 route_speed=None이라 carrot_serv.py의
+      # 클램프 블록 자체가 스킵되어 즉시 차량 거동에 영향은 없으나, 향후
+      # 이 필드를 다른 로직이 참조하면 회귀 소지 -- FINDINGS.md 229차).
+      # route_active와 동일한 mirroring 패턴을 여기도 적용.
       self.carrot_serv.route_active = self.route_active
-      self.carrot_serv.route_inert = self.route_inert
       return [], [], None
 
     # [223차, design doc §11/§12] apex RELEASE 직후 2초간 완전 OFF -- 새
@@ -757,15 +794,14 @@ class CarrotMan:
       # 재부착 방지"이지, navi 자체가 끊긴 경우까지 인위적으로 지연시킬
       # 이유가 없음 -- 제약 해제는 항상 즉시 반영이 안전하다는 132차 원칙 계승).
       self.route_active = False
-      # [228차] navi 비활성으로 인한 즉시 해제 시에도 route_inert를
-      # 함께 초기화(위 mode 0/1 분기와 동일 이유).
-      self.route_inert = False
-      # [245차] 위와 동일 이유로 flicker debounce 카운터도 초기화.
-      self._route_candidate_lost_frames = 0
+      # [247차/251차] 위 mode 0/1 분기와 동일 이유로 apex continuity
+      # 추적기 상태도 초기화.
+      self._route_cluster_locked_dist = None
+      self._route_cluster_locked_speed = None
+      self._route_cluster_miss_frames = 0
       # [229차, 위 mode 0/1 분기와 동일 이유] 이 조기 return도 함수 말미의
       # 유일한 mirror 지점을 건너뛰므로 여기서도 명시적으로 mirror한다.
       self.carrot_serv.route_active = self.route_active
-      self.carrot_serv.route_inert = self.route_inert
       return [], [], None
 
     current_position = (self.carrot_serv.vpPosPointLon, self.carrot_serv.vpPosPointLat)
@@ -939,24 +975,15 @@ class CarrotMan:
             v_ego_kph = v_ego_ms * 3.6
 
             road_limit_speed = self.carrot_serv.nRoadLimitSpeed
+            # [196차 stage0, 유지] road_limit_speed보다 느린(=감속이 필요한)
+            # 지점만 후보로 남긴다. [247차/251차] 여기서 바로 아래로
+            # severity gate(stage1, 삭제됨) 없이 stage2 클러스터링으로
+            # 직행한다(design doc §8, 251차 실차 corpus로 검증 -- devnotes
+            # WIP.md 251차, 터널/IC gore/S커브 3구간 전부 flicker 0건).
             candidates = [k for k in range(len(speeds)) if speeds[k] < road_limit_speed]
-            # [237차, 신규] severity gate (stage1) -- 위 road_limit_speed
-            # 필터(stage0, 196차)는 그대로 유지한 채, "현재 vEgo 대비
-            # 충분히 급한 커브인가"를 추가로 검사한다. apex_speed가
-            # vEgo의 ROUTE_SEVERITY_GATE_RATIO(0.70) 이상이면 후보에서
-            # 제외 -- vEgo가 비정상적으로 낮거나 0에 가까울 때 기준이
-            # 붕괴하지 않도록 max(v_ego_kph, 1.0)로 하한을 둔다. 이
-            # 게이트로 candidates가 전부 걸러져도 별도 분기를 새로 만들지
-            # 않고 아래 `if not candidates:`(기존 "감속 필요 지점 없음",
-            # 즉 직선 취급) 분기를 그대로 재사용한다(§27 최소변경).
-            candidates = [
-                k for k in candidates
-                if speeds[k] < max(v_ego_kph, 1.0) * ROUTE_SEVERITY_GATE_RATIO
-            ]
-            # [223차, design doc §5] 여러 후보 중 가장 가까운 유효 curve 1개만
-            # 선택 -- 기존 candidates[0] 방식(179/196차) 그대로 재사용
-            # (STEP1 KEEP 확정). 감속 필요 지점이 하나도 없으면(전부 직선)
-            # route는 개입하지 않는다.
+            # [223차, design doc §2, 유지] candidate telemetry는 stage0
+            # (클러스터링 이전) 원본 후보 기준으로 그대로 발행 -- 기존
+            # 분석 스크립트(analyze_apex_identity_244.py 등)와의 호환 유지.
             self._route_candidate_count = len(candidates)
             self._route_candidate0 = (-1, 0.0, 0.0)
             self._route_candidate1 = (-1, 0.0, 0.0)
@@ -981,42 +1008,22 @@ class CarrotMan:
             self.carrot_serv.route_candidate2_dist = self._route_candidate2[1]
             self.carrot_serv.route_candidate2_speed = self._route_candidate2[2]
 
-            if not candidates:
-                # [223차] 직선 -- 감속 필요 지점 없음. ACTIVE 중이었다면
-                # (예: 후보가 사라짐 == 사실상 통과) 즉시 RELEASE+hold 시작.
-                # [245차, apex flicker debounce, FINDINGS.md 245차] 단,
-                # 후보 소실이 실제로 "통과"인지 severity gate 경계의 순간
-                # 노이즈인지 이 프레임만으로는 구분할 수 없다. 연속
-                # ROUTE_RELEASE_CONFIRM_FRAMES 프레임(~0.4s) 동안 계속
-                # 사라져 있어야 RELEASE를 확정한다. 그 전까지는 마지막으로
-                # 확인된 apex(_route_apex_idx/dist/speed)를 그대로 재사용해
-                # 이번 프레임 감속을 유지한다 -- apex_dist는 갱신하지 않으므로
-                # (§27 최소변경, 새 거리 재계산 로직 추가 안 함) 짧은 debounce
-                # 구간 동안 소폭 보수적(실제보다 약간 먼 거리 취급)이다.
+            # [247차 design doc §2/§10, 251차] stage2 공간 클러스터링 +
+            # stage3 예측거리 매칭 continuity로 이번 프레임 apex를 결정한다.
+            # mode: 'matched'/'held'/'new'/'none'.
+            clusters = route_find_clusters(candidates, distances,
+                                            ROUTE_CLUSTER_MIN_POINTS, ROUTE_CLUSTER_MAX_GAP_M)
+            apex_idx, apex_dist, apex_speed, apex_mode = self._route_cluster_continuity_step(
+                clusters, distances, speeds, v_ego_ms)
+
+            if apex_mode == "none":
+                # [223차, design doc §2] 유효 apex 없음(직선 또는 continuity
+                # lock까지 모두 소실). ACTIVE 중이었다면 즉시 RELEASE+2초 hold.
                 if self.route_active:
-                    self._route_candidate_lost_frames += 1
-                    if self._route_candidate_lost_frames < ROUTE_RELEASE_CONFIRM_FRAMES:
-                        out_speed = self._route_compute_apex_out_speed(
-                            v_ego_ms, self._route_apex_dist, self._route_apex_speed)
-                    else:
-                        self.route_active = False
-                        # [228차] candidate 소실로 인한 RELEASE 시 route_inert도
-                        # 함께 해제 -- ACTIVE 추적이 끝났으므로 far-inert 마킹이
-                        # 남아있으면 다음 진입 프레임 판정을 오염시킬 수 있다.
-                        self.route_inert = False
-                        self.route_release_time = time.monotonic()
-                        self._route_candidate_lost_frames = 0
-                        out_speed = None
-                else:
-                    self._route_candidate_lost_frames = 0
-                    out_speed = None
+                    self.route_active = False
+                    self.route_release_time = time.monotonic()
+                out_speed = None
             else:
-                # [245차] 후보가 다시 확인됐으므로 flicker debounce 카운터를
-                # 리셋한다(진짜 통과가 아니었음이 이번 프레임에 확정됨).
-                self._route_candidate_lost_frames = 0
-                apex_idx = candidates[0]
-                apex_dist = distances[apex_idx]
-                apex_speed = speeds[apex_idx]
                 self._route_apex_idx = apex_idx
                 self._route_apex_dist = apex_dist
                 self._route_apex_speed = apex_speed
@@ -1024,100 +1031,77 @@ class CarrotMan:
                 self.carrot_serv.route_apex_dist = apex_dist
                 self.carrot_serv.route_apex_speed = apex_speed
 
-                # [237차] v_ego_ms/v_ego_kph는 위 severity gate에서 이미
-                # 계산됨(중복 계산 제거, §27) -- 아래 로직은 동일 함수
-                # 스코프 내 그 값을 그대로 사용한다.
-                if self.route_active and apex_dist <= ROUTE_APEX_REACHED_DIST_M:
-                    # [223차, design doc §10] apex 도달 -- 즉시 RELEASE, 2초 hold 시작.
-                    self.route_active = False
-                    # [228차] apex 도달 RELEASE 시 route_inert도 함께 해제.
-                    self.route_inert = False
-                    self.route_release_time = time.monotonic()
-                    out_speed = None
-                elif not self.route_active and v_ego_kph <= apex_speed:
-                    # [223차, design doc §6/§9] ACTIVE 진입 게이트 -- 현재
-                    # 속도가 이미 curve target 이하면 route는 개입하지
-                    # 않는다(가속 명령 절대 생성 금지, 45->50으로 올리지 않음).
-                    # hold를 걸지 않는다 -- 애초에 ACTIVE였던 적이 없으므로
-                    # §11(재부착 방지)의 대상이 아니다.
-                    # [226차, "Route 감속 다음 설계 방향" + ChatGPT 225차
-                    # 정적점검] out_speed=None이면 carrot_serv.py::
-                    # update_navi()가 route를 speed_n_sources에서 완전히
-                    # 제외해, route=vEgo 상한(ceiling)이라는 설계 의도와
-                    # 달리 apex_speed ceiling 자체가 사라져 vCruise 등
-                    # 다른 소스가 desired_speed를 apex_speed 위로 밀어올릴
-                    # 수 있었다(예: vEgo=60/apex=80/vCruise=100 -> 100까지
-                    # 개방). out_speed=apex_speed로 바꿔 route를 min()
-                    # 후보로 계속 남긴다 -- min()은 절대 위로 밀어올리지
-                    # 않으므로 "가속 명령 생성 금지"는 그대로 보장되면서
-                    # 80이라는 ceiling만 유지된다. route_active는 여전히
-                    # False로 유지(추적 시작 아님, §11 대상 아님, hold도
-                    # 안 걸림 -- 이 줄 하나 외 다른 상태 변경 없음, §27).
-                    # [228차] 이 분기는 route_active=False(추적 아님)이므로
-                    # route_inert도 False로 방어적으로 유지(§27, 상태 정의상
-                    # 항상 False여야 하지만 stale 값 잔류를 명시적으로 차단).
-                    self.route_inert = False
-                    out_speed = apex_speed
+                if self.route_active:
+                    # [247차 design doc §5] ACTIVE 해제 조건(OR) -- (1) vEgo가
+                    # 목표속도*ROUTE_ACTIVE_RELEASE_MARGIN_RATIO(1.1) 이하로
+                    # 떨어졌거나, (2) continuity가 이전에 추적하던 apex의
+                    # lock을 놓치고 'new'(다른/다음 apex 재탐색)로 전이했다
+                    # -- §10이 정의하는 predicted_dist<=0(Apex 통과 추정) 시
+                    # continuity 내부에서 즉시 lock을 해제하므로, 그 결과로
+                    # 나타나는 'new' 전이 자체가 "이전 apex를 통과했다"는
+                    # 판정과 동치다(호출부에서 이 프레임의 apex_mode로 감지).
+                    apex_passed_or_lost = apex_mode == "new"
+                    speed_reached = v_ego_kph <= apex_speed * ROUTE_ACTIVE_RELEASE_MARGIN_RATIO
+                    if apex_passed_or_lost or speed_reached:
+                        self.route_active = False
+                        self.route_release_time = time.monotonic()
+                        out_speed = None
+                    else:
+                        # [223차 design doc §4, 유지] STEP2 감속식 -- 매 프레임
+                        # 실측 vEgo와 apex까지 남은 거리만으로 "지금부터
+                        # 등감속하면 apex에서 정확히 target에 도달하는 데
+                        # 필요한 감속도"를 역산하고 autoNaviSpeedDecelRate로
+                        # 상한을 씌운 뒤 한 스텝만 차감한다. 이전 프레임 출력에
+                        # 의존하는 상태 없음(design/223cha_step2_decel_formula.md).
+                        # [247차 design doc §8, 251차] 228차 route_inert v2의
+                        # eff_dist<=0/far-inert 2분기를 하나로 합쳤다 -- 어느
+                        # 쪽이든 "지금 감속할 필요가 없다"는 동일한 의미이므로
+                        # out=v_ego_ms(그대로 통과)로 통합, target_ms로 밀어
+                        # 올리는 경로 자체를 제거해 224/228차가 각각 고쳤던
+                        # "route가 vEgo를 초과 명령"/"자기참조적 고착" 두
+                        # 회귀의 재발 여지를 원천 차단한다(§4 "Route가 현재
+                        # 속도보다 높은 속도를 명령해서는 안 된다" 그대로 구현).
+                        target_ms = apex_speed / 3.6
+                        eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
+                        if eff_dist <= 0 or v_ego_ms <= target_ms:
+                            out_speed_ms = v_ego_ms
+                        else:
+                            required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
+                            applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
+                            out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
+                        out_speed = out_speed_ms * 3.6
                 else:
-                    # [223차, design doc §7/§8, STEP2 신규 감속식] ACTIVE
-                    # 진입 또는 계속 추적. 매 프레임 실측 vEgo와 apex까지
-                    # 남은 거리만으로 "지금부터 등감속하면 apex에서 정확히
-                    # target에 도달하는 데 필요한 감속도"를 역산하고,
-                    # autoNaviSpeedDecelRate(comfort cap)로 상한을 씌운 뒤
-                    # 이번 프레임 한 스텝만 vEgo에서 차감한다. 이전 프레임
-                    # 출력에 의존하는 상태가 전혀 없다(design/
-                    # 223cha_step2_decel_formula.md 참고).
-                    # [224차, ceiling-fix, "224차 Route 로직 수정 지침" §9]
-                    # 위 223차 주석은 "out_speed<=vEgo가 수식 구조 자체로
-                    # 항상 보장됨"이라 적었으나 실제로는 v_ego_ms<=target_ms
-                    # 분기에서 out_speed_ms=max(target_ms, v_ego_ms)=target_ms로
-                    # 확정되어 이 보장이 깨졌었다(224차 실차로그: apex 40m
-                    # 앞 80.8초 정지 중 out_speed가 vEgo=0 대신 target
-                    # 45~47kph로 유지 -- route는 vEgo에 대한 상한(ceiling)일
-                    # 뿐 가속 목표가 아닌데 사실상 가속 목표처럼 동작).
-                    # v_ego_ms<=target_ms(또는 eff_dist<=0)면 애초에 감속할
-                    # 필요가 없으므로 vEgo를 그대로 통과시킨다(inert) --
-                    # target_ms까지 끌어올리지 않는다.
-                    self.route_active = True
+                    # [247차 design doc §3] INERT -- 감속 시작 조건만 검사한다.
                     target_ms = apex_speed / 3.6
                     eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
-                    # [228차, route_inert v2, FINDINGS.md 228차] 224차가 합쳤던
-                    # `v_ego_ms<=target_ms or eff_dist<=0` 단일 분기를 원인이
-                    # 다른 두 경우로 재분리한다.
                     if eff_dist <= 0:
-                        # [224차 의도 그대로 유지] apex 근접 -- vEgo를 그대로
-                        # 통과시킨다(inert). route_inert=False로 남겨 아래
-                        # carrot_serv.py 클램프가 기존 vEgo 상한 경로를 타게
-                        # 한다 -- 그래야 autoCurveSpeedLowerLimit floor가
-                        # v_ego=0을 강제로 밀어올리지 않는다(228차 2차 버그
-                        # 회귀 방지, v2 스크립트 CASE F).
-                        required_decel_mss = 0.0
-                        out_speed_ms = v_ego_ms
-                        self.route_inert = False
-                    elif v_ego_ms <= target_ms:
-                        # [228차, 신규] far-inert -- 아직 apex까지 거리는
-                        # 남았지만(eff_dist>0) 이미 vEgo가 target 이하. 224차는
-                        # 이 경우도 out=v_ego_ms(그대로 통과)로 처리했으나,
-                        # 그 값을 carrot_serv.py의 227차 클램프
-                        # (route_active=True -> min(v_ego_kph, ...))가 다시
-                        # v_ego 그 자체로 눌러버려 정차 원인이 해소된 뒤에도
-                        # route_speed가 0에서 벗어나지 못하는 자기참조적 고착이
-                        # 발생했다(FINDINGS.md 228차 "고착 메커니즘"). out을
-                        # target_ms로 유지하고 route_inert=True로 마킹해 아래
-                        # carrot_serv.py가 이 프레임의 vEgo 상한 클램프를
-                        # 생략하도록 한다.
-                        required_decel_mss = 0.0
-                        out_speed_ms = target_ms
-                        self.route_inert = True
-                    else:
-                        # [223차 STEP2 감속식 그대로 유지] 실제 감속 구간 --
-                        # route_inert=False(진짜 감속 중이므로 vEgo 상한
-                        # 클램프가 계속 적용되어야 ceiling 의미가 유지된다).
+                        # [224차 의도 계승] apex가 이미 너무 가까워 지금부터
+                        # 등감속을 새로 시작하는 것 자체가 무의미 -- vEgo를
+                        # 그대로 통과시킨다(개입 없음, INERT 유지).
+                        out_speed = v_ego_kph
+                    elif v_ego_ms > target_ms:
+                        # [247차 design doc §3] 지금부터 감속해야 함 -> ACTIVE
+                        # 진입. 진입 프레임부터 바로 §4 감속식을 적용한다
+                        # (진입 게이트와 감속 시작을 같은 프레임에 처리해도
+                        # eff_dist>0 && v_ego>target 보장되므로 안전).
+                        self.route_active = True
                         required_decel_mss = (v_ego_ms ** 2 - target_ms ** 2) / (2.0 * eff_dist)
                         applied_decel_mss = min(max(required_decel_mss, 0.0), self.carrot_serv.autoNaviSpeedDecelRate)
                         out_speed_ms = max(target_ms, v_ego_ms - applied_decel_mss * ROUTE_SPEED_LOOP_DT)
-                        self.route_inert = False
-                    out_speed = out_speed_ms * 3.6
+                        out_speed = out_speed_ms * 3.6
+                    else:
+                        # [226차 유지, "Route 감속 다음 설계 방향" + ChatGPT
+                        # 225차 정적점검] 아직 감속을 시작할 필요는 없지만
+                        # (v_ego_ms<=target_ms), out_speed=None이면 route가
+                        # arbitration에서 완전히 빠져 vCruise 등 다른 소스가
+                        # desired_speed를 apex_speed 위로 밀어올릴 수 있다
+                        # (예: vEgo=60/apex=80/vCruise=100 -> 100까지 개방).
+                        # out_speed=apex_speed로 두어 route를 min() 후보로
+                        # 남긴다 -- min()은 위로 밀어올리지 않으므로 "가속
+                        # 명령 생성 금지"(§4)는 보장되면서 apex_speed ceiling만
+                        # 유지된다. route_active는 그대로 False(추적 시작
+                        # 아님, hold 없음, 이 줄 외 다른 상태 변경 없음).
+                        out_speed = apex_speed
 
             # [223차] out_speed(제어입력)가 실제 계산됐을 때만 텔레메트리를
             # 그 값으로 갱신 -- None(비활성/개입없음)이면 함수 진입부에서
@@ -1133,10 +1117,11 @@ class CarrotMan:
             # 즉시 해제한다(hold 없이 -- 실제 곡선 이탈이 아니라 데이터 부족
             # 사유이므로 132차 "제약 해제는 즉시" 원칙 계승).
             self.route_active = False
-            # [228차] 위와 동일 이유로 route_inert도 함께 해제.
-            self.route_inert = False
-            # [245차] 위와 동일 이유로 flicker debounce 카운터도 초기화.
-            self._route_candidate_lost_frames = 0
+            # [247차/251차] 위와 동일 이유로 apex continuity 추적기 상태도
+            # 초기화(228차 route_inert/245차 debounce 카운터가 하던 역할).
+            self._route_cluster_locked_dist = None
+            self._route_cluster_locked_speed = None
+            self._route_cluster_miss_frames = 0
     else:
         resampled_points = []
         resampled_distances = []
@@ -1148,11 +1133,12 @@ class CarrotMan:
         # 즉시 해제(hold 없이, 위 navi 비활성 분기와 동일 원칙).
         if self.route_active:
             self.route_active = False
-            # [228차] lookahead 포인트 부족으로 인한 즉시 해제 시에도
-            # route_inert를 함께 초기화(위 두 "즉시 해제" 분기와 동일 이유).
-            self.route_inert = False
-            # [245차] 위와 동일 이유로 flicker debounce 카운터도 초기화.
-            self._route_candidate_lost_frames = 0
+            # [247차/251차] lookahead 포인트 부족으로 인한 즉시 해제 시에도
+            # apex continuity 추적기 상태를 함께 초기화(위 두 "즉시 해제"
+            # 분기와 동일 이유).
+            self._route_cluster_locked_dist = None
+            self._route_cluster_locked_speed = None
+            self._route_cluster_miss_frames = 0
         #self.params.remove("NavDestination")
 
     # [227차] carrot_serv.py::update_navi()가 ACTIVE 추적 분기(vEgo 상한
@@ -1160,13 +1146,10 @@ class CarrotMan:
     # 필요)를 구분할 수 있도록 이번 프레임 최종 self.route_active를
     # carrot_serv에도 반영한다(위 route_apex_* 계측과 동일 패턴 -- 별개
     # 객체이므로 계산 직후 값을 써줌, FINDINGS.md 227차).
+    # [247차/251차] route_inert는 삭제됐다 -- 새 ACTIVE 감속식이 항상
+    # out<=vEgo를 보장하므로(위 본문 주석 참고), carrot_serv.py 클램프도
+    # route_active 단독 조건으로 단순화됐다(§8, carrot_serv.py 동일 patch).
     self.carrot_serv.route_active = self.route_active
-    # [228차] route_active와 동일한 mirroring 패턴으로 route_inert도 이번
-    # 프레임 최종값을 carrot_serv에 반영한다 -- carrot_serv.py::
-    # update_navi()가 ACTIVE 추적 중 실제 감속(route_inert=False) vs
-    # far-inert(route_inert=True) 상태를 구분해 vEgo 상한 클램프 적용
-    # 여부를 결정한다(FINDINGS.md 228차).
-    self.carrot_serv.route_inert = self.route_inert
 
     return resampled_points, resampled_distances, out_speed #speeds, distances
 
