@@ -145,6 +145,20 @@ ROUTE_RELEASE_HOLD_S = 2.0
 # 판정(§10). 사용자 설계문서 원문 값(1.1) 그대로 채택, 별도 A/B 없음.
 ROUTE_ACTIVE_RELEASE_MARGIN_RATIO = 1.1
 
+# [255차, 254차 설계+사용자 확정] ACTIVE 해제 조건에 추가되는 두 번째
+# 거리 기준 -- apex까지 남은 거리가 이 값 이하가 되면, 목표속도(§5 margin
+# 조건)에 아직 못 미쳤더라도 RELEASE한다. 사용자 확정 근거: "20m 지점부터는
+# vturn(비전 기반 근거리 커브 제어)이 관여하므로, apex 자체 도달 여부가
+# 아니라 그 지점까지 충분히 감속을 했는가가 중요하다" -- route는 원거리
+# 사전감속만 담당하고 근거리는 vturn에 인계하는 역할 분리. toolkit/
+# sim_route_254_release_dist20_6state.py(254차 신규, 255차 실측 A/B)로
+# 검증 -- 25세그 실측 corpus(29126행) 기준 기존 apex_passed 방식과 결과
+# 완전 동일(far-apex-freeze 12->0 양쪽, 6-state 분포 동일, 회귀 없음).
+# 이 corpus에는 두 방식이 실제로 갈리는 사례가 없어 "이득"은 아직 실측
+# 미확인, "무해함"만 확인됨(§28 -- 실차 검증은 여전히 미실시, WIP.md
+# 255차 참고).
+ROUTE_RELEASE_DIST_M = 20.0
+
 # [247차 design doc §10 / 234차 계속4~10 원안, 251차 실차 corpus로 gate
 # 없이도 유효함 확정검증] Apex 후보 identity를 프레임 간 안정적으로
 # 유지하기 위한 2단계 추적 -- ①공간 클러스터링(stage2): 인접 후보끼리
@@ -671,13 +685,26 @@ class CarrotMan:
       self._route_cluster_miss_frames = 0
       return matched, self._route_cluster_locked_dist, self._route_cluster_locked_speed, "matched"
 
+    # [255차, 254차 design/6-state 분리] lock이 풀리는 사유를 "passed"
+    # (predicted<=0, locked apex를 실제로 지나침)와 "lost"(miss_frames
+    # 초과, 신호만 순간 소실)로 구분해 반환한다 -- 기존 4-state는 두
+    # 경우 모두 "new"(재탐색 성공)/"none"(재탐색 실패)으로 뭉뚱그려
+    # 진단이 불가능했다. release 판정 자체(아래 carrot_navi_route()의
+    # apex_passed_or_lost)는 passed/lost/new를 여전히 동일하게 취급하므로
+    # 이 분리만으로는 동작이 바뀌지 않는다(§27 최소변경, toolkit/
+    # sim_route_254_release_dist20_6state.py::_continuity_step()과 동일
+    # 로직 이식, synthetic self-test 4케이스로 검증됨).
+    reset_reason = None
     if self._route_cluster_locked_dist is not None:
-      self._route_cluster_miss_frames += 1
-      if (self._route_cluster_miss_frames < ROUTE_APEX_MISS_TOLERANCE_FRAMES
-          and predicted is not None and predicted > 0):
-        self._route_cluster_locked_dist = predicted
-        return -1, predicted, self._route_cluster_locked_speed, "held"
-      # tolerance 초과, 또는 predicted<=0(Apex 통과 추정) -- lock 해제.
+      if predicted is not None and predicted <= 0:
+        reset_reason = "passed"
+      else:
+        self._route_cluster_miss_frames += 1
+        if (self._route_cluster_miss_frames < ROUTE_APEX_MISS_TOLERANCE_FRAMES
+            and predicted is not None and predicted > 0):
+          self._route_cluster_locked_dist = predicted
+          return -1, predicted, self._route_cluster_locked_speed, "held"
+        reset_reason = "lost"
       self._route_cluster_locked_dist = None
       self._route_cluster_locked_speed = None
       self._route_cluster_miss_frames = 0
@@ -687,9 +714,9 @@ class CarrotMan:
       self._route_cluster_locked_dist = distances[idx]
       self._route_cluster_locked_speed = speeds[idx]
       self._route_cluster_miss_frames = 0
-      return idx, distances[idx], speeds[idx], "new"
+      return idx, distances[idx], speeds[idx], (reset_reason or "new")
 
-    return -1, None, None, "none"
+    return -1, None, None, (reset_reason or "none")
 
   def carrot_navi_route(self):
 
@@ -1016,9 +1043,20 @@ class CarrotMan:
             apex_idx, apex_dist, apex_speed, apex_mode = self._route_cluster_continuity_step(
                 clusters, distances, speeds, v_ego_ms)
 
-            if apex_mode == "none":
+            if apex_mode == "none" or apex_speed is None:
                 # [223차, design doc §2] 유효 apex 없음(직선 또는 continuity
                 # lock까지 모두 소실). ACTIVE 중이었다면 즉시 RELEASE+2초 hold.
+                # [255차] `apex_speed is None` 가드 추가 -- 255차 6-state
+                # 분리 후 "passed"/"lost"이면서 동시에 clusters가 비어
+                # apex_speed=None인 조합이 나올 수 있다(예: INERT 상태에서
+                # 추적하던 apex가 통과/소실되고 재탐색 후보도 없는 프레임).
+                # 이 조합은 원래 "none"과 의미상 동일(제어할 apex 없음)한데
+                # mode 문자열만 "passed"/"lost"라 위 `apex_mode == "none"`
+                # 만으로는 걸러지지 않는다 -- 아래 INERT 분기의
+                # `target_ms = apex_speed / 3.6`이 None으로 나눠지는 크래시를
+                # 방지(toolkit/sim_route_254_release_dist20_6state.py에서
+                # 실측 dashcam corpus로 최초 발견/수정된 것과 동일 패턴,
+                # devnotes FINDINGS.md/WIP.md 255차 참고).
                 if self.route_active:
                     self.route_active = False
                     self.route_release_time = time.monotonic()
@@ -1040,9 +1078,19 @@ class CarrotMan:
                     # continuity 내부에서 즉시 lock을 해제하므로, 그 결과로
                     # 나타나는 'new' 전이 자체가 "이전 apex를 통과했다"는
                     # 판정과 동치다(호출부에서 이 프레임의 apex_mode로 감지).
-                    apex_passed_or_lost = apex_mode == "new"
+                    # [255차] apex_mode가 "new"뿐 아니라 "passed"/"lost"도
+                    # 동일하게 취급(위 continuity 6-state 분리 참고) --
+                    # 세 값 모두 "이전에 추적하던 apex의 continuity를
+                    # 잃었다"는 동일한 의미이므로 release 판정 자체는
+                    # 4-state 시절과 동일하게 유지된다(§27, 동작 무변경).
+                    apex_passed_or_lost = apex_mode in ("passed", "lost", "new")
                     speed_reached = v_ego_kph <= apex_speed * ROUTE_ACTIVE_RELEASE_MARGIN_RATIO
-                    if apex_passed_or_lost or speed_reached:
+                    # [255차, 254차 design/사용자 확정] apex까지 남은 거리가
+                    # ROUTE_RELEASE_DIST_M(20m) 이하면 목표속도 도달 여부와
+                    # 무관하게 RELEASE -- 그 지점부터는 vturn이 근거리 커브
+                    # 제어를 담당한다는 설계 결정(위 상수 선언부 주석 참고).
+                    dist_reached = apex_dist is not None and apex_dist <= ROUTE_RELEASE_DIST_M
+                    if apex_passed_or_lost or speed_reached or dist_reached:
                         self.route_active = False
                         self.route_release_time = time.monotonic()
                         out_speed = None
