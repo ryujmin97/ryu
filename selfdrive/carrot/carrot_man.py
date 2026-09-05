@@ -928,18 +928,29 @@ class CarrotMan:
         distance = -10.0
         sample = 4
         if len(resampled_points) >= sample * 2 + 1:
-            # Calculate curvatures and speeds based on curvature
-            speeds = []
+            # [269차 Phase1, devnotes toolkit/perf_route_269_curvature_batch_optimize.py
+            # self-test 10종 시나리오(경계값 포함) 전부 PASS로 아래 3개
+            # 변경이 원본과 출력 100% 동일함을 확인한 뒤 적용:
+            # (1) np.interp를 매 반복 스칼라 호출하지 않고 curvature를
+            #     먼저 리스트로 모아 macro 1회만 배치 호출 -- 원소별
+            #     독립 선형보간이라 배치화해도 결과값 변화 없음.
+            # Calculate curvatures based on curvature (speed는 배치 interp 이후)
+            macro_abs_curv = []
             for i in range(len(resampled_points) - sample * 2):
                 distance += distance_interval
                 p1, p2, p3 = resampled_points[i], resampled_points[i + sample], resampled_points[i + sample * 2]
                 curvature = calculate_curvature(p1, p2, p3)
-                speed = np.interp(abs(curvature), V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
-                if abs(curvature) < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
-                  speed = max(speed, self.carrot_serv.nRoadLimitSpeed)
                 curvatures.append(curvature)
-                speeds.append(speed)
+                macro_abs_curv.append(abs(curvature))
                 distances.append(distance)
+
+            macro_speeds_arr = np.interp(macro_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+            speeds = []
+            for i in range(len(curvatures)):
+                speed = macro_speeds_arr[i]
+                if macro_abs_curv[i] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
+                    speed = max(speed, self.carrot_serv.nRoadLimitSpeed)
+                speeds.append(speed)
 
             # [147차] 미세(fine) chord 보조 샘플 -- 위 매크로(sample=4,
             # 40m) 루프가 놓치는 좁은 코너(예: 교차로 우회전)를 보정.
@@ -948,30 +959,36 @@ class CarrotMan:
             # 위치에서 더 급한(=speed가 더 낮은) 쪽만 채택한다. 매크로
             # 결과 자체를 대체하지 않으므로 장거리 lookahead 매크로
             # 형상(직선 오탐 방지)은 그대로 유지된다.
+            #
+            # [269차 Phase1, 위 perf_route_269 self-test로 확인] macro와
+            # fine 거리그리드는 둘 다 distance=-10.0에서 시작해
+            # distance_interval씩 lock-step 증가하므로 fine_points[j]는
+            # distances[j]와 항상 정확히 같은 지점을 가리킨다 -- 원본의
+            # "가장 가까운 fine 포인트 순차탐색"은 매 j에서 결국 fine_idx=j
+            # 그 자체를 고르는 것과 100% 동일한 결과였다(탐색이 필요한
+            # 상황 자체가 발생하지 않음). 따라서 (2) fine 계산량을
+            # len(distances)개로 제한(뒷단에서 안 쓰는 나머지 계산 삭제)
+            # 하고 (3) 탐색용 (distance, curvature, speed) 튜플 리스트
+            # 대신 curvature만 담은 리스트로 바로 인덱스 정렬 병합한다.
+            # (4) np.interp도 macro와 동일하게 배치 1회로 통합.
             sample_fine = ROUTE_CURVATURE_FINE_SAMPLE
             if sample_fine and sample_fine < sample and len(resampled_points) >= sample_fine * 2 + 1:
                 # [213차, 위 macro distance와 동일 이유] 20m 하드플로어 제거.
-                fine_distance = -10.0
-                fine_points = []  # (distance, curvature, speed)
-                for i in range(len(resampled_points) - sample_fine * 2):
-                    fine_distance += distance_interval
-                    p1, p2, p3 = resampled_points[i], resampled_points[i + sample_fine], resampled_points[i + sample_fine * 2]
-                    f_curvature = calculate_curvature(p1, p2, p3)
-                    f_speed = np.interp(abs(f_curvature), V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
-                    if abs(f_curvature) < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
-                      f_speed = max(f_speed, self.carrot_serv.nRoadLimitSpeed)
-                    fine_points.append((fine_distance, f_curvature, f_speed))
-                if fine_points:
-                    fine_idx = 0
-                    for j in range(len(distances)):
-                        d = distances[j]
-                        # distances[]와 fine_points[]는 둘 다 10m 간격
-                        # 같은 시작점이므로, 가장 가까운 fine 포인트를
-                        # 앞에서부터 순차 탐색(선형, O(n))으로 찾는다.
-                        while (fine_idx + 1 < len(fine_points)
-                               and abs(fine_points[fine_idx + 1][0] - d) <= abs(fine_points[fine_idx][0] - d)):
-                            fine_idx += 1
-                        f_dist, f_curv, f_speed = fine_points[fine_idx]
+                n_fine = min(len(distances), len(resampled_points) - sample_fine * 2)
+                if n_fine > 0:
+                    fine_curvatures = []
+                    fine_abs_curv = []
+                    for i in range(n_fine):
+                        p1, p2, p3 = resampled_points[i], resampled_points[i + sample_fine], resampled_points[i + sample_fine * 2]
+                        f_curvature = calculate_curvature(p1, p2, p3)
+                        fine_curvatures.append(f_curvature)
+                        fine_abs_curv.append(abs(f_curvature))
+                    fine_speeds_arr = np.interp(fine_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+                    for j in range(n_fine):
+                        f_curv = fine_curvatures[j]
+                        f_speed = fine_speeds_arr[j]
+                        if fine_abs_curv[j] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
+                            f_speed = max(f_speed, self.carrot_serv.nRoadLimitSpeed)
                         if f_speed < speeds[j]:
                             speeds[j] = f_speed
                             curvatures[j] = f_curv
