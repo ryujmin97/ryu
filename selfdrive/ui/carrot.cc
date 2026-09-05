@@ -978,6 +978,16 @@ private:
     QString szPosRoadName = "";
     QString szTBTMainText = "";
 
+    // [270차, devnotes WIP 269차 CPU 최적화 후보 2번] wrap_name_lines()
+    // 폰트축소 루프(nvgTextBounds/nvgTextBreakLines)는 name_line1
+    // 문자열이 바뀌지 않는 대부분의 프레임에서 매번 재계산할 필요가
+    // 없다 -- 직전에 계산한 문자열/결과를 캐시해 재사용(§27 최소변경,
+    // wrap_name_lines 본체는 무변경).
+    std::string cached_name_line1;
+    bool cached_name_valid = false;
+    int cached_name_fs = 0;
+    std::vector<std::string> cached_name_wrapped;
+
 protected:
     QPointF navi_turn_point[2];
     float navi_turn_point_x[2] = { 0.0, };
@@ -1197,9 +1207,21 @@ protected:
           name_line1 = (nl == std::string::npos) ? full : full.substr(0, nl);
           name_line2 = (nl == std::string::npos) ? "" : full.substr(nl + 1);
           if (name_line1.length() > 0) {
-            auto result = wrap_name_lines(name_line1, TBT_BOX_W - 40);
-            name_fs = result.first;
-            name_wrapped = result.second;
+            // [270차] name_line1이 직전 프레임과 동일하면 캐시 재사용 --
+            // TBT_BOX_W는 constexpr(항상 동일 avail_w)이므로 캐시 키는
+            // name_line1 하나로 충분하다.
+            if (cached_name_valid && cached_name_line1 == name_line1) {
+              name_fs = cached_name_fs;
+              name_wrapped = cached_name_wrapped;
+            } else {
+              auto result = wrap_name_lines(name_line1, TBT_BOX_W - 40);
+              name_fs = result.first;
+              name_wrapped = result.second;
+              cached_name_line1 = name_line1;
+              cached_name_fs = name_fs;
+              cached_name_wrapped = name_wrapped;
+              cached_name_valid = true;
+            }
             if (name_wrapped.size() > 1) {
               tbt_extra_h = (int)(name_wrapped.size() - 1) * TBT_LINE_STEP;
             }
