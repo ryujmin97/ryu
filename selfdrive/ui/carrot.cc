@@ -988,6 +988,16 @@ private:
     int cached_name_fs = 0;
     std::vector<std::string> cached_name_wrapped;
 
+    // [278차, devnotes WIP 277차 후속 -- CPU 최적화 2번째 대상] fit_bottom_text_size()
+    // (szSdiDescr, 과속/구간단속 문구 폰트축소)도 wrap_name_lines()와 동일하게
+    // nvgTextBounds를 최대 4회(FS(30)->FS(20), 3px 단위) 반복 호출한다.
+    // szSdiDescr 문자열이 직전 프레임과 동일하면(문구가 몇 초간 고정 표시되는
+    // 경우가 대부분) 재계산할 필요가 없으므로 캐시(§27 최소변경, 계산 로직
+    // 자체는 무변경).
+    std::string cached_sdi_text;
+    bool cached_sdi_valid = false;
+    int cached_sdi_fs = 0;
+
 protected:
     QPointF navi_turn_point[2];
     float navi_turn_point_x[2] = { 0.0, };
@@ -1354,13 +1364,24 @@ protected:
         };
         if (szSdiDescr.length() > 0) {
             float bounds[4];  // [xmin, ymin, xmax, ymax]를 저장하는 배열
-            int fs = fit_bottom_text_size(szSdiDescr.toStdString().c_str());
+            // [278차] szSdiDescr 문자열이 직전 프레임과 동일하면 fit_bottom_text_size()의
+            // 반복 축소 루프(최대 4회 nvgTextBounds)를 건너뛰고 캐시된 fs를 재사용.
+            std::string sdi_text = szSdiDescr.toStdString();
+            int fs;
+            if (cached_sdi_valid && cached_sdi_text == sdi_text) {
+              fs = cached_sdi_fs;
+            } else {
+              fs = fit_bottom_text_size(sdi_text.c_str());
+              cached_sdi_text = sdi_text;
+              cached_sdi_fs = fs;
+              cached_sdi_valid = true;
+            }
             nvgFontSize(s->vg, fs);
-            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + TBT_SDI_Y, szSdiDescr.toStdString().c_str(), NULL, bounds);
+            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + TBT_SDI_Y, sdi_text.c_str(), NULL, bounds);
             float text_width = bounds[2] - bounds[0];
             float text_height = bounds[3] - bounds[1];
             ui_fill_rect(s->vg, { (int)bounds[0] - 8, (int)bounds[1] - 2, (int)text_width + 16, (int)text_height + 10 }, COLOR_GREEN, 8);
-            ui_draw_text(s, tbt_x + 20, tbt_y + TBT_SDI_Y, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
+            ui_draw_text(s, tbt_x + 20, tbt_y + TBT_SDI_Y, sdi_text.c_str(), fs, COLOR_WHITE, BOLD);
         }
         // [276차, 사용자 지시] else if -> if 로 변경. szSdiDescr(구간단속중 등)와
         // szPosRoadName(도로명/route=/vturn=)이 동시에 와도 둘 다 그린다.
