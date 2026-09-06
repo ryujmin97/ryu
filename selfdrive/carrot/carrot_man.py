@@ -137,7 +137,20 @@ ROUTE_MAX_SPEED_KPH = 150.0
 # [223차, 신규] Route RELEASE 이후 완전 OFF를 유지하는 시간(design doc
 # §6/§11/§12) -- curve A apex 직후 curve B가 즉시 감지되어 route가 바로
 # 재부착되는 현상을 막기 위한 목적. 사용자 설계문서 지시값 그대로(2초).
-ROUTE_RELEASE_HOLD_S = 2.0
+# [282차, 사용자 확정 -- devnotes WIP.md 281/282차 참고] 2.0 -> 0.0으로
+# 무력화(구조는 유지, 값만 교체 -- §27 최소변경/즉시 원복 가능). 근거:
+# 266차 confidence blend 도입 이후, RELEASE의 3가지 트리거(apex_passed_
+# or_lost/speed_reached/dist_reached) 전부가 hold와 무관하게 이미 "즉시
+# 재-ACTIVE"를 구조적으로 차단하고 있음을 소스 추적(L1258-1299 부근)으로
+# 확인 -- 신규/재탐색 candidate는 streak=1로 confidence=0.0이 강제돼
+# 게이트 통과 자체가 불가능하다. 281차 합성 시나리오 A(hold=0에서도 노이즈
+# 즉시 재래치 발생 안 함)로 1차 확인, 시나리오 B(근접 2연속 커브)에서는
+# hold=2.0이 confidence 자연축적(0.4~1.15s) 대비 최대 약 1.6초의 순수
+# 추가 지연을 유발함을 확인 -- hold의 원래 목적(노이즈 방지)이 confidence
+# blend와 중복되면서, 남은 효과는 "다음 정당한 커브로의 전환 지연"뿐이라고
+# 판단해 사용자가 제거 확정. **실차 검증 전(NEEDS_VALIDATION)** -- 회귀
+# 발견 시 2.0으로 즉시 복원 가능하도록 상수/분기 구조 자체는 손대지 않음.
+ROUTE_RELEASE_HOLD_S = 0.0
 
 # [247차, design doc §5] ACTIVE 해제 조건 중 하나 -- vEgo가 목표속도의 이
 # 비율 이하로 떨어지면(=사실상 목표속도 도달) 즉시 RELEASE한다. 나머지
