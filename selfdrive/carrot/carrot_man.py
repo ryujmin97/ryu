@@ -156,7 +156,19 @@ ROUTE_RELEASE_HOLD_S = 0.0
 # 비율 이하로 떨어지면(=사실상 목표속도 도달) 즉시 RELEASE한다. 나머지
 # 해제 조건(Apex 통과)은 아래 continuity 추적의 predicted_dist<=0으로
 # 판정(§10). 사용자 설계문서 원문 값(1.1) 그대로 채택, 별도 A/B 없음.
-ROUTE_ACTIVE_RELEASE_MARGIN_RATIO = 1.1
+# [290차, 사용자 확정(옵션 a) -- devnotes WIP.md 289차 what-if 시뮬레이션
+# 후속] 1.1 -> 1.05로 축소. 근거: 289차 실측 route1~4 corpus(110건)
+# what-if 결과, margin=1.05에서 flicker train이 4건->1건으로 명확히
+# 감소함을 확인(toolkit/sim_route_289_margin_ab_real_log.py). 단,
+# 289차가 함께 확인한 바로는 "RELEASE가 늦어지는" 30건 중 28건이
+# margin 자체가 아니라 그 사이 apex candidate가 continuity 소실로
+# 재분류되어 발생한 것이라, "route가 더 오래 작동한다"는 사용자 체감
+# 개선의 근본 해법은 아닐 수 있음(옵션 b: apex candidate continuity
+# 안정성 개선은 별도 open track으로 남음). 이번 변경은 §27 최소변경(상수
+# 값만 교체, 6-state 판정 구조 자체는 무변경) -- flicker train 감소라는
+# 확인된 이득만을 근거로 사용자가 진행 확정. **실차 검증 전
+# (NEEDS_VALIDATION)** -- 회귀 발견 시 1.1로 즉시 복원 가능.
+ROUTE_ACTIVE_RELEASE_MARGIN_RATIO = 1.05
 
 # [255차, 254차 설계+사용자 확정] ACTIVE 해제 조건에 추가되는 두 번째
 # 거리 기준 -- apex까지 남은 거리가 이 값 이하가 되면, 목표속도(§5 margin
