@@ -1208,18 +1208,23 @@ protected:
         // 도로명/route=/vturn= 블록(szPosRoadName)이 완전히 가려지던
         // 문제 수정 -- 두 정보를 동시에 표시. szSdiDescr 유무와 무관하게
         // 도로명 줄바꿈을 계산하도록 아래 조건에서 szSdiDescr 검사를 제거.
-        bool has_sdi = szSdiDescr.length() > 0;
+        //
+        // [277차, 사용자 지시로 되돌림] 276차에서 두 블록이 겹치지 않도록
+        // 도로명/route=/vturn= 블록 전체를 80px 위로 밀고 박스 높이도
+        // 그만큼 키웠으나, 그 결과 이 블록이 그 위에 고정 좌표(tbt_y+75)로
+        // 그려지는 ETA 잔여시간 줄과 정확히 겹쳐 실차 화면에서 글자가
+        // 뒤섞이는 회귀가 발생(사용자 스크린샷으로 확인). 사용자 지시:
+        // "과속 문구가 떠도 박스 크기/도로명·route·vturn 위치는 절대
+        // 변하지 않게, 과속 문구만 나타나게" -> road_block_shift 관련
+        // 로직 전부 제거. 도로명/route=/vturn=는 항상 원래 고정 좌표
+        // (155/195/235, §243차 기준)로만 그리고, 박스 높이도 도로명
+        // 줄바꿈(name_wrapped) 외에는 절대 늘어나지 않는다.
         bool has_road = szPosRoadName.length() > 0;
-        // 두 블록이 겹치지 않도록, 함께 표시될 때만 도로명/route=/vturn=
-        // 블록 전체를 기존 y좌표에서 위로 TBT_LINE_STEP*2(80px) 이동.
-        // szSdiDescr 단독 표시(y=tbt_y+220, 아래 참고)는 그대로 두고,
-        // 그 위 공간에 도로명 블록(vturn 기준 최하단 줄)이 겹치지 않게 함.
-        int road_block_shift = (has_sdi && has_road) ? (TBT_LINE_STEP * 2) : 0;
 
         std::string name_line1, name_line2;
         std::vector<std::string> name_wrapped;
         int name_fs = FS(30);
-        int tbt_extra_h = road_block_shift;
+        int tbt_extra_h = 0;
         if (has_road) {
           std::string full = szPosRoadName.toStdString();
           size_t nl = full.find('\n');
@@ -1242,8 +1247,7 @@ protected:
               cached_name_valid = true;
             }
             if (name_wrapped.size() > 1) {
-              // [276차] road_block_shift를 덮어쓰지 않도록 대입(=) 대신 누적(+=)으로 변경.
-              tbt_extra_h += (int)(name_wrapped.size() - 1) * TBT_LINE_STEP;
+              tbt_extra_h = (int)(name_wrapped.size() - 1) * TBT_LINE_STEP;
             }
           }
         }
@@ -1326,6 +1330,15 @@ protected:
         // 우측 경계를 넘어갈 수 있음 -> 폭 측정 후 초과 시 폰트를 FS(30)에서
         // 최소 FS(20)까지 3px 단위로 자동 축소(그래도 넘치면 FS(20) 유지, 잘림은
         // 감수). [231차] 기준값 자체를 TBT_FONT_SCALE(1.3x)만큼 키움.
+        // [277차, 사용자 지시] szSdiDescr y좌표를 220->250으로 내림. 박스
+        // 하단(tbt_y+280)까지 30px, 바로 위 vturn= 줄(235)까지 15px 여백 --
+        // szSdiDescr는 좌측 정렬(x=tbt_x+20), vturn=은 우측 정렬(right_x
+        // 근처)이라 통상 폭에서는 겹치지 않지만, 문구가 길어지는 경우까지
+        // 완전히 보장하려면 실제 화면에서 재확인 필요(§29, 아래 검증 참고).
+        // 이 값은 도로명/route=/vturn=의 고정 좌표(155/195/235)와 무관하게
+        // 독립적으로만 조정한 것 -- 저 세 줄은 276차 회귀 이후 다시 고정값
+        // 그대로 사용(아래 참고).
+        static constexpr int TBT_SDI_Y = 250;
         nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
         auto fit_bottom_text_size = [&](const char* txt) {
           int fs = FS(30);
@@ -1333,7 +1346,7 @@ protected:
           float avail_w = TBT_BOX_W - 40; // 좌우 20px씩 여백
           while (fs > FS(20)) {
             nvgFontSize(s->vg, fs);
-            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + 220, txt, NULL, bounds);
+            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + TBT_SDI_Y, txt, NULL, bounds);
             if (bounds[2] - bounds[0] <= avail_w) break;
             fs -= 3;
           }
@@ -1343,17 +1356,18 @@ protected:
             float bounds[4];  // [xmin, ymin, xmax, ymax]를 저장하는 배열
             int fs = fit_bottom_text_size(szSdiDescr.toStdString().c_str());
             nvgFontSize(s->vg, fs);
-            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), NULL, bounds);
+            nvgTextBounds(s->vg, tbt_x + 20, tbt_y + TBT_SDI_Y, szSdiDescr.toStdString().c_str(), NULL, bounds);
             float text_width = bounds[2] - bounds[0];
             float text_height = bounds[3] - bounds[1];
             ui_fill_rect(s->vg, { (int)bounds[0] - 8, (int)bounds[1] - 2, (int)text_width + 16, (int)text_height + 10 }, COLOR_GREEN, 8);
-            ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
+            ui_draw_text(s, tbt_x + 20, tbt_y + TBT_SDI_Y, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
         }
         // [276차, 사용자 지시] else if -> if 로 변경. szSdiDescr(구간단속중 등)와
         // szPosRoadName(도로명/route=/vturn=)이 동시에 와도 둘 다 그린다.
-        // 겹침 방지는 위에서 계산한 road_block_shift(둘 다 있을 때만 80px)로
-        // 아래 세 줄의 y좌표를 함께 위로 올려서 처리(§27 최소변경 -- y좌표
-        // 상수에서 road_block_shift만 빼는 형태로 최소화).
+        // [277차, 사용자 지시로 되돌림] 아래 도로명/route=/vturn= 세 줄은
+        // szSdiDescr 유무와 무관하게 항상 원래 고정 좌표(155/195/235)를
+        // 그대로 사용 -- 박스 크기/이 세 줄 위치는 과속 문구가 떠도 절대
+        // 변하지 않는다(위 has_road/tbt_extra_h도 동일 원칙).
         if (szPosRoadName.length() > 0) {
           // 154차: 도로명(1줄) + route=NN.N(2줄)로 분리해서 그림(name_line1/name_line2는
           // 박스 크기 계산 시점에 이미 split·줄바꿈 계산 완료 — 위쪽 참고).
@@ -1371,7 +1385,7 @@ protected:
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             int n = (int)name_wrapped.size();
             for (int i = 0; i < n; i++) {
-              int line_y = tbt_y + 155 - road_block_shift - (n - 1 - i) * TBT_LINE_STEP;
+              int line_y = tbt_y + 155 - (n - 1 - i) * TBT_LINE_STEP;
               ui_draw_text(s, right_x, line_y, name_wrapped[i].c_str(), name_fs, COLOR_WHITE, BOLD);
             }
           }
@@ -1390,7 +1404,7 @@ protected:
             std::string number = (eq == std::string::npos) ? "" : name_line2.substr(eq + 1);            // "145.1"
 
             const int fs_number = fs_prefix; // [232차] prefix와 동일 크기로 통일(기존 2배 비율 폐지), 색상만 초록으로 강조
-            float line2_y = tbt_y + 195 - road_block_shift;      // [243차] 235->195 (한 줄 위로 이동) / [276차] road_block_shift 반영
+            float line2_y = tbt_y + 195;      // [243차] 235->195 (한 줄 위로 이동) / [277차] 276차 shift 되돌림, 고정값 복원
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             float number_w = 0;
@@ -1416,7 +1430,7 @@ protected:
             char vturn_str[32];
             sprintf(vturn_str, "%d", nVTurnSpeed);
             std::string vt_prefix = "vturn=";
-            float line3_y = tbt_y + 235 - road_block_shift; // route=가 235->195로 옮기며 비운 자리 / [276차] road_block_shift 반영
+            float line3_y = tbt_y + 235; // route=가 235->195로 옮기며 비운 자리 / [277차] 276차 shift 되돌림, 고정값 복원
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             nvgFontSize(s->vg, fs_prefix);
