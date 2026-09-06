@@ -181,7 +181,21 @@ ROUTE_RELEASE_DIST_M = 10.0
 # devnotes PARAMS_REGISTRY.md 참고).
 ROUTE_CLUSTER_MIN_POINTS = 2
 ROUTE_CLUSTER_MAX_GAP_M = 40.0
-ROUTE_APEX_MISS_TOLERANCE_FRAMES = 3
+# [280차, 사용자 확정 -- confidence blend(266차) 도입 이후에도 목표속도
+# flicker 잔존 확인 후 재조정] 3(150ms) -> 6(300ms)으로 확대.
+# 근거(266차 코드와의 상호작용): `held` 상태는 streak를 유지하지만
+# tolerance 초과로 `lost`가 되면 streak가 1로 리셋되고, 그 즉시
+# confidence=1-exp(-(streak-1)/CONFIDENCE_TAU)=0.0이 돼 eff_apex_speed가
+# v_ego_kph로 튐(=route 개입 순간 해제) -- 짧은 candidate 소실 하나가
+# "전체 리셋 -> confidence 0 -> 서서히 재개입"으로 증폭되는 것이 flicker의
+# 실제 경로. tolerance 확대는 이 전체 리셋 발생 빈도 자체를 줄인다.
+# 주의(미해소): 235차가 확정한 대로 t=2116~2122.2 S커브 구간은 노이즈가
+# 아니라 "실제 2단 굴곡(가까운 완만커브+먼 급커브)"이 맞으므로, held->new
+# 전환 자체는 정상 동작(§28 -- 236차 결론, 다중 apex 재설계는 중단됨). 다만
+# 그 전환 간격(약 250~290ms)이 이번 tolerance(300ms)와 겹쳐, 두 번째
+# 실제 커브로의 전환이 최대 150ms 추가 지연될 수 있음 -- "잘못된 병합"
+# 위험은 아니고 "정당한 전환의 반응 지연" 트레이드오프이므로 별개로 기록.
+ROUTE_APEX_MISS_TOLERANCE_FRAMES = 6
 # [274차, 사용자 확정 -- route 관여 구간 확대] 10.0 -> 20.0으로 확대.
 # 근거: 273차 감도분석이 정리한 완화 후보 중 "리스크 가장 낮음"으로 평가된
 # 항목(실측 10m 그리드 양자화에 맞춰 여유폭만 보정하는 성격)을 사용자가
