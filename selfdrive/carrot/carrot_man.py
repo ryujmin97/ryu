@@ -963,6 +963,23 @@ class CarrotMan:
                 distances.append(distance)
 
             macro_speeds_arr = np.interp(macro_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+            # [279차, 사용자 요청 -- MapTurnSpeedFactor 부활] 210차가 제거한
+            # 곱셈(carrot_serv.py 구 calculate_current_speed 경로, 그 계산
+            # 자체가 223차 이후 완전히 폐기됨)을 그대로 되살리는 대신,
+            # 현재(258/266차) route 아키텍처의 진짜 "apex 목표속도" 산출
+            # 지점인 여기(V_CURVE_LOOKUP_VALS 곡률->속도 테이블 결과)에
+            # 새로 연결한다. mapTurnSpeedFactor>1이면 route가 산출하는 커브
+            # 목표속도 자체가 올라가 route 개입(감속)이 약해지고(더 높은
+            # 값에서 road_limit_speed 후보 제외 가능), <1이면 더 많이
+            # 줄어든다(UI 설명 "작을수록 경로에 따라 속도가 많이 줄어듦"과
+            # 정합). vEgo 상한 불변식(§4)은 이 지점과 무관 -- out_speed는
+            # 여전히 뒤쪽 ACTIVE/INERT 게이트(carrot_man.py 1180번대)에서
+            # v_ego_ms 기준으로만 클램프되므로, 여기서 목표속도를 올려도
+            # "route가 vEgo보다 빠른 속도를 명령"하는 210차류 회귀는
+            # 재발하지 않는다(목표속도가 vEgo를 넘으면 그 지점은 애초에
+            # candidates에서 제외되거나 INERT `v_ego_ms<=target_ms` 분기로
+            # 빠짐, §4 계승).
+            macro_speeds_arr = macro_speeds_arr * self.carrot_serv.mapTurnSpeedFactor
             speeds = []
             for i in range(len(curvatures)):
                 speed = macro_speeds_arr[i]
@@ -1002,6 +1019,12 @@ class CarrotMan:
                         fine_curvatures.append(f_curvature)
                         fine_abs_curv.append(abs(f_curvature))
                     fine_speeds_arr = np.interp(fine_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+                    # [279차] macro와 동일하게 fine 쪽에도 mapTurnSpeedFactor
+                    # 적용 -- 안 그러면 fine이 더 급한 지점만 골라 채택하는
+                    # 로직(아래 "f_speed < speeds[j]"만 교체)에서 factor
+                    # 적용 전 값과 적용 후 값이 뒤섞여 비교당해 일관성이
+                    # 깨진다(§27, macro/fine 동일 배율 유지가 최소변경).
+                    fine_speeds_arr = fine_speeds_arr * self.carrot_serv.mapTurnSpeedFactor
                     for j in range(n_fine):
                         f_curv = fine_curvatures[j]
                         f_speed = fine_speeds_arr[j]
