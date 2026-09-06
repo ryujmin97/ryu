@@ -157,7 +157,14 @@ ROUTE_ACTIVE_RELEASE_MARGIN_RATIO = 1.1
 # 이 corpus에는 두 방식이 실제로 갈리는 사례가 없어 "이득"은 아직 실측
 # 미확인, "무해함"만 확인됨(§28 -- 실차 검증은 여전히 미실시, WIP.md
 # 255차 참고).
-ROUTE_RELEASE_DIST_M = 20.0
+# [274차, 사용자 확정 -- route 관여 구간 확대] 20.0 -> 10.0으로 축소.
+# 근거: route가 vturn에 조기 인계하는 지점을 더 늦춰(apex에 더 가까울
+# 때까지) route ACTIVE 구간 자체를 늘리려는 목적 -- "더 많은 구간에서
+# route가 작용하도록" 사용자 지시(2026-09-06 세션). 이 값이 작을수록
+# dist_reached 조건이 늦게 성립해 route가 더 오래 ACTIVE를 유지한다.
+# 254/255차가 검증한 6-state 로직/구조 자체는 무변경(§27 최소변경 -- 상수
+# 값만 교체). 실차 검증 필요(§28/§29, 아래 274차 참고).
+ROUTE_RELEASE_DIST_M = 10.0
 
 # [247차 design doc §10 / 234차 계속4~10 원안, 251차 실차 corpus로 gate
 # 없이도 유효함 확정검증] Apex 후보 identity를 프레임 간 안정적으로
@@ -175,7 +182,18 @@ ROUTE_RELEASE_DIST_M = 20.0
 ROUTE_CLUSTER_MIN_POINTS = 2
 ROUTE_CLUSTER_MAX_GAP_M = 40.0
 ROUTE_APEX_MISS_TOLERANCE_FRAMES = 3
-CONTINUITY_MATCH_TOLERANCE_M = 10.0
+# [274차, 사용자 확정 -- route 관여 구간 확대] 10.0 -> 20.0으로 확대.
+# 근거: 273차 감도분석이 정리한 완화 후보 중 "리스크 가장 낮음"으로 평가된
+# 항목(실측 10m 그리드 양자화에 맞춰 여유폭만 보정하는 성격)을 사용자가
+# 이번 세션에 채택 확정. 267차 실측 재검증에서도 10m보다 15m 쪽이 지속되는
+# 커브 track을 분리시키지 않아(streak 리셋 억제) confidence blend와의
+# 상호작용이 더 유리하다는 근거가 이미 있었음(PARAMS_REGISTRY.md 참고).
+# 20m로 확대하면 apex 후보 매칭 허용폭이 넓어져 continuity가 더 쉽게
+# 유지되고, 결과적으로 route가 관여(ACTIVE 진입)하는 구간이 늘어난다.
+# stage3 로직 구조 자체는 무변경(§27 최소변경 -- 상수 값만 교체). 실차
+# 검증 필요(§28/§29, 아래 274차 참고) -- 두 커브가 인접한 구간에서
+# ambiguous 매칭(§12 미해결 질문)이 실제로 발생하는지 특히 주의.
+CONTINUITY_MATCH_TOLERANCE_M = 20.0
 
 # [266차, devnotes WIP.md 265차 design -- 264차 confidence 신호 4종 검증
 # 트랙 확정(persistence 단독 채택) 이후 실 patch] apex_speed 소비 지점(아래
