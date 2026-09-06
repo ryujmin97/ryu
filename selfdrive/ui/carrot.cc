@@ -1162,7 +1162,14 @@ protected:
         char str[128] = "";
 
         int tbt_x = s->fb_w - (TBT_BOX_W + TBT_MARGIN_R);
-        int tbt_y = s->fb_h - 250;
+        // [276차, 사용자 지시] 기존 fb_h-250 기준 박스 하단(tbt_y+280, 아래
+        // ui_fill_rect 참고)이 fb_h+30, 즉 화면 프레임버퍼 하단보다 30px
+        // 아래로 내려가 있어 박스 아랫부분이 항상 잘리고 있었음(실측:
+        // TBT_BOX_H=340, 박스 top=tbt_y-60, 따라서 bottom=tbt_y-60+340=
+        // tbt_y+280). fb_h-280으로 바꿔 bottom=fb_h로 딱 맞추는 대신,
+        // 여유 10px을 더 두어 fb_h-290(=박스 위로 40px 이동, bottom=fb_h-10)
+        // 으로 조정.
+        int tbt_y = s->fb_h - 290;
         int right_x = tbt_x + TBT_BOX_W - 20; // [230차] 하단 두 줄(도로명/route=) 우측끝 정렬 기준 x좌표
         NVGcolor stroke_color = COLOR_WHITE;
         // [231차] 이 함수 안의 모든 폰트 크기는 기존(스케일 적용 전) 값에
@@ -1197,11 +1204,23 @@ protected:
           return std::make_pair(fs, lines);
         };
 
+        // [276차, 사용자 지시] "구간단속중" 등 szSdiDescr가 있을 때
+        // 도로명/route=/vturn= 블록(szPosRoadName)이 완전히 가려지던
+        // 문제 수정 -- 두 정보를 동시에 표시. szSdiDescr 유무와 무관하게
+        // 도로명 줄바꿈을 계산하도록 아래 조건에서 szSdiDescr 검사를 제거.
+        bool has_sdi = szSdiDescr.length() > 0;
+        bool has_road = szPosRoadName.length() > 0;
+        // 두 블록이 겹치지 않도록, 함께 표시될 때만 도로명/route=/vturn=
+        // 블록 전체를 기존 y좌표에서 위로 TBT_LINE_STEP*2(80px) 이동.
+        // szSdiDescr 단독 표시(y=tbt_y+220, 아래 참고)는 그대로 두고,
+        // 그 위 공간에 도로명 블록(vturn 기준 최하단 줄)이 겹치지 않게 함.
+        int road_block_shift = (has_sdi && has_road) ? (TBT_LINE_STEP * 2) : 0;
+
         std::string name_line1, name_line2;
         std::vector<std::string> name_wrapped;
         int name_fs = FS(30);
-        int tbt_extra_h = 0;
-        if (szSdiDescr.length() == 0 && szPosRoadName.length() > 0) {
+        int tbt_extra_h = road_block_shift;
+        if (has_road) {
           std::string full = szPosRoadName.toStdString();
           size_t nl = full.find('\n');
           name_line1 = (nl == std::string::npos) ? full : full.substr(0, nl);
@@ -1223,7 +1242,8 @@ protected:
               cached_name_valid = true;
             }
             if (name_wrapped.size() > 1) {
-              tbt_extra_h = (int)(name_wrapped.size() - 1) * TBT_LINE_STEP;
+              // [276차] road_block_shift를 덮어쓰지 않도록 대입(=) 대신 누적(+=)으로 변경.
+              tbt_extra_h += (int)(name_wrapped.size() - 1) * TBT_LINE_STEP;
             }
           }
         }
@@ -1329,7 +1349,12 @@ protected:
             ui_fill_rect(s->vg, { (int)bounds[0] - 8, (int)bounds[1] - 2, (int)text_width + 16, (int)text_height + 10 }, COLOR_GREEN, 8);
             ui_draw_text(s, tbt_x + 20, tbt_y + 220, szSdiDescr.toStdString().c_str(), fs, COLOR_WHITE, BOLD);
         }
-        else if (szPosRoadName.length() > 0) {
+        // [276차, 사용자 지시] else if -> if 로 변경. szSdiDescr(구간단속중 등)와
+        // szPosRoadName(도로명/route=/vturn=)이 동시에 와도 둘 다 그린다.
+        // 겹침 방지는 위에서 계산한 road_block_shift(둘 다 있을 때만 80px)로
+        // 아래 세 줄의 y좌표를 함께 위로 올려서 처리(§27 최소변경 -- y좌표
+        // 상수에서 road_block_shift만 빼는 형태로 최소화).
+        if (szPosRoadName.length() > 0) {
           // 154차: 도로명(1줄) + route=NN.N(2줄)로 분리해서 그림(name_line1/name_line2는
           // 박스 크기 계산 시점에 이미 split·줄바꿈 계산 완료 — 위쪽 참고).
           // [230차, 사용자 지시] 두 줄 모두 박스 우측끝(right_x) 정렬로 변경.
@@ -1346,7 +1371,7 @@ protected:
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             int n = (int)name_wrapped.size();
             for (int i = 0; i < n; i++) {
-              int line_y = tbt_y + 155 - (n - 1 - i) * TBT_LINE_STEP;
+              int line_y = tbt_y + 155 - road_block_shift - (n - 1 - i) * TBT_LINE_STEP;
               ui_draw_text(s, right_x, line_y, name_wrapped[i].c_str(), name_fs, COLOR_WHITE, BOLD);
             }
           }
@@ -1365,7 +1390,7 @@ protected:
             std::string number = (eq == std::string::npos) ? "" : name_line2.substr(eq + 1);            // "145.1"
 
             const int fs_number = fs_prefix; // [232차] prefix와 동일 크기로 통일(기존 2배 비율 폐지), 색상만 초록으로 강조
-            float line2_y = tbt_y + 195;      // [243차] 235->195 (한 줄 위로 이동)
+            float line2_y = tbt_y + 195 - road_block_shift;      // [243차] 235->195 (한 줄 위로 이동) / [276차] road_block_shift 반영
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             float number_w = 0;
@@ -1391,7 +1416,7 @@ protected:
             char vturn_str[32];
             sprintf(vturn_str, "%d", nVTurnSpeed);
             std::string vt_prefix = "vturn=";
-            float line3_y = tbt_y + 235; // route=가 235->195로 옮기며 비운 자리
+            float line3_y = tbt_y + 235 - road_block_shift; // route=가 235->195로 옮기며 비운 자리 / [276차] road_block_shift 반영
 
             nvgTextAlign(s->vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
             nvgFontSize(s->vg, fs_prefix);
