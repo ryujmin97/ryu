@@ -89,6 +89,22 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	routeCandidate2Idx @49 : Int32;   # 세 번째로 가까운 후보. 없으면 -1
 	routeCandidate2Dist @50 : Float32;
 	routeCandidate2Speed @51 : Float32;
+
+	# [305차 계측] 304차가 발견한 "naviPointsActive=True 유지되는데도
+	# naviPaths만 1.90~1.96초 비는" 65건 신규 하위유형(FINDINGS.md 304차)의
+	# 원인을 (1) self.navi_points 버퍼 재대입 race (2) 교체된 버퍼가 한동안
+	# 현재위치를 못 덮는 경우 (3) 버퍼가 실제로 비워지는 경우 로 실차
+	# 로그에서 구분하기 위한 필드. carrot_man.py::carrot_navi_route()의
+	# get_path_after_distance() 호출 직전/직후 상태와, self.navi_points가
+	# navd/TCP 7709/TCP 7712 등에서 재대입되는 lifecycle을 그대로 노출한다
+	# -- 기존 필드(@0~@51)는 건드리지 않고 뒤에 append. 제어 로직/판정에는
+	# 전혀 사용되지 않는 순수 관측용 추가(§27).
+	routeNaviPointsLen @52 : Int32;    # get_path_after_distance() 호출 직전 len(self.navi_points). 호출 자체가 없던 프레임(조기 return)은 0
+	routeNaviStartIdxIn @53 : Int32;   # 위 호출 직전 self.navi_points_start_index(입력값). 호출 없던 프레임은 -1
+	routeNaviStartIdxOut @54 : Int32;  # 위 호출 직후 self.navi_points_start_index(반환값=closest_index, 탐색실패 시 -1). 호출 없던 프레임은 -1
+	routePathLen @55 : Int32;          # get_path_after_distance()가 반환한 path 길이. 0이면 이번 프레임 naviPaths 공백의 직접 원인. 호출 없던 프레임은 0
+	routeNaviUpdateAgeMs @56 : Float32; # now - 마지막 self.navi_points 재대입 시각(ms). 이번 온로드 세션에서 한 번도 재대입 없었으면 -1.0
+	routeNaviUpdateCount @57 : Int32;   # self.navi_points가 재대입된 누적 횟수(빈 리스트로 클리어되는 경우 포함, 정상 수신만 세지 않음)
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {

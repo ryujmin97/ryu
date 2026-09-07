@@ -573,6 +573,17 @@ class CarrotMan:
     self.navi_points_start_index = 0
     self.navi_points_active = False
     self.navd_active = False
+    # [305차 계측] `self.navi_points`가 navd/TCP 7709/TCP 7712 등 여러
+    # 스레드에서 락 없이 재대입되는 지점(FINDINGS.md 304차가 좁힌 원인
+    # 위치)의 lifecycle을 관측하기 위한 카운터/타임스탬프. 304차가 발견한
+    # "naviPointsActive=True 유지되는데도 naviPaths만 1.90~1.96초 비는"
+    # 65건 신규 하위유형의 원인을 (1) 버퍼 교체 race (2) 교체된 버퍼가
+    # 한동안 현재위치를 못 덮는 경우 (3) 버퍼가 실제로 비워지는 경우 로
+    # 구분하는 것이 목적 -- 제어/판정 로직은 전혀 참조하지 않는 순수
+    # 관측용 상태(§27). update_count는 self.navi_points가 재대입될
+    # 때마다(빈 리스트로 클리어되는 경우 포함) 증가한다.
+    self._navi_points_update_count = 0
+    self._navi_points_last_update_mono = None
     # [182차 계측] navi_points_active 드롭아웃(FINDINGS.md 182차) 원인규명용.
     # 어느 경로(navd cereal/TCP 7709 raw/TCP 7712 handle_route)가 마지막으로
     # route를 성공 수신했는지, 비활성 상태가 얼마나 지속됐는지를 cereal로
@@ -716,6 +727,9 @@ class CarrotMan:
                 #print("clear path_points: navd_active: ", self.navd_active)
                 self.navi_points = []
                 self.navi_points_active = False
+                # [305차 계측] 재대입 지점 -- 클리어도 동일하게 카운트(§ 위 __init__ 주석 참고)
+                self._navi_points_update_count += 1
+                self._navi_points_last_update_mono = time.monotonic()
 
           except Exception as e:
             if self.connection:
@@ -849,6 +863,32 @@ class CarrotMan:
     self.carrot_serv.route_candidate2_dist = 0.0
     self.carrot_serv.route_candidate2_speed = 0.0
 
+    # [305차 계측] navi_points 버퍼 lifecycle 진단(FINDINGS.md 304차가 좁힌
+    # "self.navi_points 버퍼 자체가 순간 고갈"을 실차 로그로 원인분리하기
+    # 위한 관측용 필드. PointsLen/StartIdxIn/StartIdxOut/PathLen은 아래
+    # get_path_after_distance() 호출부(§193차와 동일 패턴)에 실제로 도달한
+    # 프레임에서만 유의미한 값으로 덮어쓰이므로, 여기서는 "이번 프레임엔
+    # 호출 자체가 없었음"을 나타내는 sentinel로 초기화한다(조기 return
+    # 분기에서도 이 sentinel이 그대로 발행되어야 하기 때문 -- 193차
+    # _route_apex_idx=-1과 동일 이유).
+    self._route_navi_points_len = 0
+    self._route_navi_start_idx_in = -1
+    self._route_navi_start_idx_out = -1
+    self._route_path_len = 0
+    self.carrot_serv.route_navi_points_len = 0
+    self.carrot_serv.route_navi_start_idx_in = -1
+    self.carrot_serv.route_navi_start_idx_out = -1
+    self.carrot_serv.route_path_len = 0
+    # UpdateCount/UpdateAgeMs는 이 함수 호출 여부(조기 return 포함)와
+    # 무관하게 다른 스레드(navd/TCP 7709/TCP 7712)가 self.navi_points를
+    # 재대입한 lifecycle 자체를 나타내므로, sentinel이 아니라 매 프레임
+    # 실측값을 그대로 계산해 발행한다.
+    if self._navi_points_last_update_mono is not None:
+      self.carrot_serv.route_navi_update_age_ms = (time.monotonic() - self._navi_points_last_update_mono) * 1000.0
+    else:
+      self.carrot_serv.route_navi_update_age_ms = -1.0
+    self.carrot_serv.route_navi_update_count = self._navi_points_update_count
+
     # [223차, 신규 -- design doc §0/§3] route_enabled = Parameter에 Route가
     # 포함되어 있는가(mode 2/3). Mode 0/1이면 curve search/apex 선택/감속
     # 계산/상태기계 자체를 이번 프레임에 전혀 실행하지 않는다(STEP1 A항이
@@ -902,6 +942,9 @@ class CarrotMan:
         #curvature_cache.clear()
         self.navi_points = []
         self.navi_points_active = False
+        # [305차 계측] 재대입 지점 -- 클리어도 동일하게 카운트
+        self._navi_points_update_count += 1
+        self._navi_points_last_update_mono = time.monotonic()
         if self.active_carrot_last > 1:
           #self.params.remove("NavDestination")
           pass
@@ -962,7 +1005,29 @@ class CarrotMan:
     # naviPointsActive 활성 구간의 프레임당 apexIdx 변경 빈도, 215차가 쓴
     # 지표와 동일)를 반드시 대조할 것.**
     route_lookahead_m = 600.0
-    path, self.navi_points_start_index, start_point = get_path_after_distance(self.navi_points_start_index, self.navi_points, current_position, route_lookahead_m)
+    # [305차 계측] 원래 코드는 `get_path_after_distance(self.navi_points_start_index,
+    # self.navi_points, ...)` 호출 인자로 두 attribute를 그 자리에서 순서대로
+    # 읽었다(먼저 navi_points_start_index, 그다음 navi_points) -- 다른 스레드
+    # (navd/TCP 7709/TCP 7712)가 그 사이에 self.navi_points를 재대입하면
+    # start_index가 새 버퍼 범위를 벗어날 수 있다는 것이 304차가 좁힌 원인
+    # 후보(FINDINGS.md 304차). 텔레메트리가 "실제로 이 호출에 들어간 값"을
+    # 그대로 기록하도록, 동일한 좌->우 평가 순서로 먼저 로컬 변수에 담고
+    # 그 로컬 변수를 그대로 호출 인자로 사용한다(값/타이밍/race 노출 여부
+    # 모두 원본과 동일 -- 로직 변경 없음, 순수 관측용 §27).
+    _navi_start_idx_in = self.navi_points_start_index
+    _navi_points_snapshot = self.navi_points
+    _navi_points_len_in = len(_navi_points_snapshot)
+    path, self.navi_points_start_index, start_point = get_path_after_distance(_navi_start_idx_in, _navi_points_snapshot, current_position, route_lookahead_m)
+    _navi_start_idx_out = self.navi_points_start_index
+    _path_len = len(path)
+    self._route_navi_points_len = _navi_points_len_in
+    self._route_navi_start_idx_in = _navi_start_idx_in
+    self._route_navi_start_idx_out = _navi_start_idx_out
+    self._route_path_len = _path_len
+    self.carrot_serv.route_navi_points_len = _navi_points_len_in
+    self.carrot_serv.route_navi_start_idx_in = _navi_start_idx_in
+    self.carrot_serv.route_navi_start_idx_out = _navi_start_idx_out
+    self.carrot_serv.route_path_len = _path_len
     relative_coords = []
     if path:
         #relative_coords = gps_to_relative_xy(path, current_position, heading_deg)
@@ -1749,6 +1814,9 @@ class CarrotMan:
         self.navi_points = [(c.longitude, c.latitude) for c in coords]
         self.navi_points_start_index = 0
         self.navi_points_active = True
+        # [305차 계측] 재대입 지점
+        self._navi_points_update_count += 1
+        self._navi_points_last_update_mono = time.monotonic()
         print("Received points from navd:", len(self.navi_points))
         self.navd_active = True
         self._navi_route_source = "navd"  # [182차 계측]
@@ -1799,6 +1867,11 @@ class CarrotMan:
                   continue
 
               self.navi_points = []
+              # [305차 계측] 재대입 지점 -- 이 직후 루프에서 append로 채워지므로
+              # (7709 경로 고유의 별도 잠재 race, 이번 세션 범위 밖) 재대입
+              # "순간"만 카운트한다(§27 최소변경, 사용자 지시 정의 그대로).
+              self._navi_points_update_count += 1
+              self._navi_points_last_update_mono = time.monotonic()
               points = []
               for i in range(0, len(all_data), 8):
                 x, y = struct.unpack('!ff', all_data[i:i+8])
@@ -1986,6 +2059,9 @@ class CarrotMan:
       self.navi_points_start_index = 0
       self.navi_points_active = False
       self.navd_active = False
+      # [305차 계측] 재대입 지점 -- 클리어도 동일하게 카운트
+      self._navi_points_update_count += 1
+      self._navi_points_last_update_mono = time.monotonic()
       return
 
     # valid만 필터 (필요 없으면 제거)
@@ -1996,6 +2072,9 @@ class CarrotMan:
       self.navi_points_start_index = 0
       self.navi_points_active = False
       self.navd_active = False
+      # [305차 계측] 재대입 지점 -- 클리어도 동일하게 카운트
+      self._navi_points_update_count += 1
+      self._navi_points_last_update_mono = time.monotonic()
       return
 
     # x=lon, y=lat
@@ -2015,6 +2094,10 @@ class CarrotMan:
     self.navi_points = navi_points
     self.navi_points_start_index = 0
     self.navi_points_active = True
+    # [305차 계측] 재대입 지점 -- 304차가 좁힌 원인 후보(버퍼 교체
+    # race/불완전 버퍼)의 상위 트리거 중 하나로 지목된 TCP 7712 경로.
+    self._navi_points_update_count += 1
+    self._navi_points_last_update_mono = time.monotonic()
     self.navd_active = True
     self._navi_route_source = "tcp_navi"  # [182차 계측] TCP 7712 handle_route 경로
 

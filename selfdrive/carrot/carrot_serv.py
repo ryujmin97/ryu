@@ -210,6 +210,16 @@ class CarrotServ:
     self.route_candidate2_dist = 0.0
     self.route_candidate2_speed = 0.0
 
+    # [305차 계측] navi_points 버퍼 lifecycle 진단(custom.capnp @52~@57).
+    # 위 route_apex_*/route_candidate* 와 동일한 이유/패턴 -- carrot_man.py가
+    # 계산 직후 이 속성에 값을 써준다. 제어 로직에는 전혀 사용되지 않음.
+    self.route_navi_points_len = 0
+    self.route_navi_start_idx_in = -1
+    self.route_navi_start_idx_out = -1
+    self.route_path_len = 0
+    self.route_navi_update_age_ms = -1.0
+    self.route_navi_update_count = 0
+
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
     self.phone_latitude = 0.0
@@ -1360,6 +1370,16 @@ class CarrotServ:
     msg.carrotMan.routeCandidate2Idx = int(self.route_candidate2_idx)
     msg.carrotMan.routeCandidate2Dist = float(self.route_candidate2_dist)
     msg.carrotMan.routeCandidate2Speed = float(self.route_candidate2_speed)
+    # [305차 계측] navi_points 버퍼 lifecycle 진단 실제 발행(custom.capnp
+    # @52~@57). carrot_man.py::carrot_navi_route()가 매 사이클
+    # self.route_navi_*/route_path_len 에 값을 써주므로 여기서는 그대로
+    # msg에 담기만 한다(위 apex/candidate와 동일 패턴).
+    msg.carrotMan.routeNaviPointsLen = int(self.route_navi_points_len)
+    msg.carrotMan.routeNaviStartIdxIn = int(self.route_navi_start_idx_in)
+    msg.carrotMan.routeNaviStartIdxOut = int(self.route_navi_start_idx_out)
+    msg.carrotMan.routePathLen = int(self.route_path_len)
+    msg.carrotMan.routeNaviUpdateAgeMs = float(self.route_navi_update_age_ms)
+    msg.carrotMan.routeNaviUpdateCount = int(self.route_navi_update_count)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')
