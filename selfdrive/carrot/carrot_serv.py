@@ -220,6 +220,25 @@ class CarrotServ:
     self.route_navi_update_age_ms = -1.0
     self.route_navi_update_count = 0
 
+    # [307차 계측] 306차가 확정한 min_points=2 게이트 구조적 취약점을
+    # 실차 로그로 검증하기 위한 저장 공간(custom.capnp @58~@69). 위
+    # route_apex_*/route_candidate*/route_navi_* 와 동일한 이유/패턴 --
+    # carrot_man.py가 계산 직후 이 속성에 값을 써준다. 제어 로직에는
+    # 전혀 사용되지 않는 순수 관측용(routeProvisional*은 설계안 A
+    # shadow tracker 결과, 실제 apex 선택과 무관).
+    self.route_cluster_count = 0
+    self.route_apex_mode = ""
+    self.route_apex_fine_triggered = False
+    self.route_orphan_count = 0
+    self.route_orphan_dist = 0.0
+    self.route_orphan_speed = 0.0
+    self.route_provisional_active = False
+    self.route_provisional_dist = 0.0
+    self.route_provisional_speed = 0.0
+    self.route_provisional_streak = 0
+    self.route_provisional_match_error = 0.0
+    self.route_provisional_promoted = False
+
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
     self.phone_latitude = 0.0
@@ -1380,6 +1399,22 @@ class CarrotServ:
     msg.carrotMan.routePathLen = int(self.route_path_len)
     msg.carrotMan.routeNaviUpdateAgeMs = float(self.route_navi_update_age_ms)
     msg.carrotMan.routeNaviUpdateCount = int(self.route_navi_update_count)
+    # [307차 계측] min_points=2 게이트 구조적 취약점(306차 확정) 실측
+    # 검증용 발행(custom.capnp @58~@69). carrot_man.py::carrot_navi_route()가
+    # 매 사이클 self.route_cluster_count 등에 값을 써주므로 여기서는
+    # 그대로 msg에 담기만 한다(위 apex/candidate/navi와 동일 패턴).
+    msg.carrotMan.routeClusterCount = int(self.route_cluster_count)
+    msg.carrotMan.routeApexMode = str(self.route_apex_mode)
+    msg.carrotMan.routeApexFineTriggered = bool(self.route_apex_fine_triggered)
+    msg.carrotMan.routeOrphanSingletonCount = int(self.route_orphan_count)
+    msg.carrotMan.routeOrphanSingletonDist = float(self.route_orphan_dist)
+    msg.carrotMan.routeOrphanSingletonSpeed = float(self.route_orphan_speed)
+    msg.carrotMan.routeProvisionalActive = bool(self.route_provisional_active)
+    msg.carrotMan.routeProvisionalDist = float(self.route_provisional_dist)
+    msg.carrotMan.routeProvisionalSpeed = float(self.route_provisional_speed)
+    msg.carrotMan.routeProvisionalStreak = int(self.route_provisional_streak)
+    msg.carrotMan.routeProvisionalMatchError = float(self.route_provisional_match_error)
+    msg.carrotMan.routeProvisionalPromoted = bool(self.route_provisional_promoted)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')

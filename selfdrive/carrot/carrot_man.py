@@ -206,6 +206,15 @@ ROUTE_RELEASE_DIST_M = 10.0
 # devnotes PARAMS_REGISTRY.md 참고).
 ROUTE_CLUSTER_MIN_POINTS = 2
 ROUTE_CLUSTER_MAX_GAP_M = 40.0
+# [307차 계측, NEEDS_VALIDATION] 306차가 확정한 min_points=2 게이트의
+# 구조적 취약점(고립된 1포인트 좁은 커브가 노이즈로 오인되어 제거될 수
+# 있음)을 실차 로그로 검증하기 위한 설계안 A(시간적 continuity 승격)
+# shadow tracker의 관측용 임계값 -- 이 값 자체도, shadow tracker의 결과
+# (routeProvisional*)도 어떤 제어 로직/판정에도 사용되지 않는다(순수
+# 계측, 아래 _route_provisional_singleton_step()/custom.capnp 참고).
+# 실측 로그로 고립 후보의 실제 지속 프레임 분포를 확인한 뒤 조정할 것 --
+# 3(150ms)은 시작값일 뿐 아직 어떤 corpus로도 검증되지 않음.
+PROVISIONAL_PROMOTE_STREAK = 3
 # [280차, 사용자 확정 -- confidence blend(266차) 도입 이후에도 목표속도
 # flicker 잔존 확인 후 재조정] 3(150ms) -> 6(300ms)으로 확대.
 # 근거(266차 코드와의 상호작용): `held` 상태는 streak를 유지하지만
@@ -618,6 +627,13 @@ class CarrotMan:
     # confidence blend용 streak 카운터 -- locked_dist/speed/miss_frames와
     # 항상 함께 초기화/리셋된다(아래 모든 mirror 지점 동일).
     self._route_cluster_streak = 0
+    # [307차 계측] 위 cluster continuity 추적기와 완전히 분리된 병렬
+    # shadow tracker 상태 -- 실제 apex/제어에 전혀 사용되지 않음(아래
+    # _route_provisional_singleton_step() 참고). locked_dist=None이면
+    # 추적 중인 고립 후보 없음.
+    self._route_prov_locked_dist = None
+    self._route_prov_locked_speed = None
+    self._route_prov_streak = 0
 
     self.active_carrot_last = False
 
@@ -821,6 +837,69 @@ class CarrotMan:
     self._route_cluster_streak = 0
     return -1, None, None, (reset_reason or "none"), self._route_cluster_streak
 
+  def _route_provisional_singleton_step(self, orphans, distances, speeds, v_ego_ms):
+    # [307차 계측, 관측 전용 -- 실제 apex 선택/제어 경로와 완전히 분리됨]
+    # 306차가 코드+합성 재현으로 확정한 가설(min_points=2 게이트가 고립된
+    # 1포인트 좁은 커브를 노이즈로 오인해 제거)을 실차 로그로 검증하기
+    # 위한 shadow tracker. clusters(min_points=2 통과)에서 탈락한 고립
+    # 후보(orphans)만 대상으로, 위 _route_cluster_continuity_step()과
+    # 동일한 vEgo*dt 예측 + CONTINUITY_MATCH_TOLERANCE_M 매칭을 병렬로
+    # 적용해 프레임간 지속성(streak)만 관측한다.
+    #
+    # 179차 후속2(FINDINGS.md)가 "같은 프레임 내 인접 그리드 지점 개수"로
+    # 노이즈/진짜커브를 구분하려다 실패한 것과 이 tracker는 다른 종류의
+    # 신호를 쓴다 -- 179차 후속2는 공간적(단일 프레임 내) 지속성이었고,
+    # 이 tracker는 시간적(여러 프레임에 걸친 물리적 위치 일관성) 지속성이다.
+    # 실제 도로에 존재하는 좁은 커브는 차량이 접근하며 매 프레임 거리가
+    # vEgo*dt만큼 자연스럽게 줄어들지만, 그리드 리샘플링 잡음이 이 패턴을
+    # 여러 프레임 연속으로 재현할 가능성은 낮다는 것이 이 신호의 근거다
+    # (단, 이 근거 자체도 아직 실측 미검증 -- 이번 계측의 목적이 바로 이것).
+    #
+    # 단순화(의도적): 위 stage3와 달리 miss-frame 유예(hold)를 두지 않고
+    # 매칭 실패 시 즉시 리셋한다 -- 관측 목적상 "그리드 잡음 없이도 연속
+    # 매칭되는가"를 더 엄격하게(보수적으로) 확인하기 위함. 실측 결과
+    # 유예가 필요하다고 판단되면 다음 세션에서 추가 검토.
+    #
+    # 반환값(모두 관측용, 어디에도 소비되지 않음): (active, dist, speed,
+    # streak, match_error, promoted). promoted는 streak>=
+    # PROVISIONAL_PROMOTE_STREAK(NEEDS_VALIDATION 상수) 여부일 뿐, 실제
+    # 승격/제어 개입은 전혀 발생시키지 않는다.
+    dt = ROUTE_SPEED_LOOP_DT
+    predicted = (self._route_prov_locked_dist - v_ego_ms * dt) if self._route_prov_locked_dist is not None else None
+
+    matched = None
+    if predicted is not None and predicted > 0 and orphans:
+      best = None
+      best_err = None
+      for c in orphans:
+        idx = c[0]
+        err = abs(distances[idx] - predicted)
+        if best_err is None or err < best_err:
+          best, best_err = idx, err
+      if best_err is not None and best_err <= CONTINUITY_MATCH_TOLERANCE_M:
+        matched = (best, best_err)
+
+    if matched is not None:
+      idx, err = matched
+      self._route_prov_locked_dist = distances[idx]
+      self._route_prov_locked_speed = speeds[idx]
+      self._route_prov_streak += 1
+      promoted = self._route_prov_streak >= PROVISIONAL_PROMOTE_STREAK
+      return True, self._route_prov_locked_dist, self._route_prov_locked_speed, self._route_prov_streak, err, promoted
+
+    # 매칭 실패(고립 후보 소실, predicted<=0 통과, 또는 애초에 추적 없음) --
+    # 즉시 리셋 후 이번 프레임 orphan 중 최근접으로 새로 시작(있으면).
+    self._route_prov_locked_dist = None
+    self._route_prov_locked_speed = None
+    self._route_prov_streak = 0
+    if orphans:
+      idx = orphans[0][0]
+      self._route_prov_locked_dist = distances[idx]
+      self._route_prov_locked_speed = speeds[idx]
+      self._route_prov_streak = 1
+      return True, distances[idx], speeds[idx], 1, 0.0, (1 >= PROVISIONAL_PROMOTE_STREAK)
+    return False, 0.0, 0.0, 0, 0.0, False
+
   def carrot_navi_route(self):
 
     # [193차] route apex 진단값은 매 호출마다 초기화한다.
@@ -889,6 +968,35 @@ class CarrotMan:
       self.carrot_serv.route_navi_update_age_ms = -1.0
     self.carrot_serv.route_navi_update_count = self._navi_points_update_count
 
+    # [307차 계측] 위 193/204/305차와 동일 패턴 -- 매 호출 sentinel로
+    # 초기화해, 이번 프레임에 계산부까지 도달하지 못한 경우(조기 return
+    # 포함) 직전 프레임 값이 잔류하지 않도록 한다. 제어 로직에는 전혀
+    # 사용되지 않는 순수 관측용 필드(custom.capnp @58~@69 참고).
+    self._route_cluster_count = 0
+    self._route_apex_mode = ""
+    self._route_apex_fine_triggered = False
+    self._route_orphan_count = 0
+    self._route_orphan_dist = 0.0
+    self._route_orphan_speed = 0.0
+    self._route_prov_active_pub = False
+    self._route_prov_dist_pub = 0.0
+    self._route_prov_speed_pub = 0.0
+    self._route_prov_streak_pub = 0
+    self._route_prov_match_error_pub = 0.0
+    self._route_prov_promoted_pub = False
+    self.carrot_serv.route_cluster_count = 0
+    self.carrot_serv.route_apex_mode = ""
+    self.carrot_serv.route_apex_fine_triggered = False
+    self.carrot_serv.route_orphan_count = 0
+    self.carrot_serv.route_orphan_dist = 0.0
+    self.carrot_serv.route_orphan_speed = 0.0
+    self.carrot_serv.route_provisional_active = False
+    self.carrot_serv.route_provisional_dist = 0.0
+    self.carrot_serv.route_provisional_speed = 0.0
+    self.carrot_serv.route_provisional_streak = 0
+    self.carrot_serv.route_provisional_match_error = 0.0
+    self.carrot_serv.route_provisional_promoted = False
+
     # [223차, 신규 -- design doc §0/§3] route_enabled = Parameter에 Route가
     # 포함되어 있는가(mode 2/3). Mode 0/1이면 curve search/apex 선택/감속
     # 계산/상태기계 자체를 이번 프레임에 전혀 실행하지 않는다(STEP1 A항이
@@ -910,6 +1018,9 @@ class CarrotMan:
       self._route_cluster_locked_speed = None
       self._route_cluster_miss_frames = 0
       self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
+      self._route_prov_locked_dist = None  # [307차] shadow tracker도 동일하게 초기화
+      self._route_prov_locked_speed = None
+      self._route_prov_streak = 0
       # [229차, ChatGPT 228차 코드리뷰 지적 검증+수정] 이 조기 return은 함수
       # 말미의 유일한 carrot_serv mirror 지점에 도달하지 못해, mode 0/1로
       # 머무는 동안 carrot_serv.route_active가 직전 프레임 값에 stale하게
@@ -960,6 +1071,9 @@ class CarrotMan:
       self._route_cluster_locked_speed = None
       self._route_cluster_miss_frames = 0
       self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
+      self._route_prov_locked_dist = None  # [307차] shadow tracker도 동일하게 초기화
+      self._route_prov_locked_speed = None
+      self._route_prov_streak = 0
       # [229차, 위 mode 0/1 분기와 동일 이유] 이 조기 return도 함수 말미의
       # 유일한 mirror 지점을 건너뛰므로 여기서도 명시적으로 mirror한다.
       self.carrot_serv.route_active = self.route_active
@@ -1091,6 +1205,15 @@ class CarrotMan:
                     speed = max(speed, self.carrot_serv.nRoadLimitSpeed)
                 speeds.append(speed)
 
+            # [307차 계측] 이번 프레임 각 지점의 speed가 147차 fine-sample
+            # 보정으로 macro 대비 더 급하게 대체됐는지 표시하는 관측용
+            # 배열 -- fine 블록 실행 여부와 무관하게 항상 정의(미실행/
+            # 미대체 지점은 False 유지). 아래 override 루프 밖에서 먼저
+            # 초기화해야 fine 블록이 스킵되는 프레임(sample_fine 조건
+            # 미충족)에서도 길이가 speeds와 항상 일치한다. 제어 로직에는
+            # 사용되지 않음(§27).
+            fine_triggered = [False] * len(speeds)
+
             # [147차] 미세(fine) chord 보조 샘플 -- 위 매크로(sample=4,
             # 40m) 루프가 놓치는 좁은 코너(예: 교차로 우회전)를 보정.
             # 같은 리샘플 폴리라인에 ROUTE_CURVATURE_FINE_SAMPLE(기본
@@ -1137,6 +1260,7 @@ class CarrotMan:
                         if f_speed < speeds[j]:
                             speeds[j] = f_speed
                             curvatures[j] = f_curv
+                            fine_triggered[j] = True  # [307차 계측] 관측용, 제어 미사용
             #print(f"curvatures= {[round(s, 4) for s in curvatures]}")
             #print(f"speeds= {[round(s, 1) for s in speeds]}")
             # [160차, 사용자 설계 전면 교체 -- 곡선_가감속_코딩.txt +
@@ -1234,10 +1358,46 @@ class CarrotMan:
             # [247차 design doc §2/§10, 251차] stage2 공간 클러스터링 +
             # stage3 예측거리 매칭 continuity로 이번 프레임 apex를 결정한다.
             # mode: 'matched'/'held'/'new'/'none'.
-            clusters = route_find_clusters(candidates, distances,
-                                            ROUTE_CLUSTER_MIN_POINTS, ROUTE_CLUSTER_MAX_GAP_M)
+            # [307차 계측] min_points=1로 한 번만 호출해 gap 기준 분할
+            # 결과 전체(all_clusters)를 얻은 뒤, 여기서 min_points>=2
+            # 필터를 직접 적용한다 -- route_find_clusters()의 분할 자체는
+            # max_gap_m에만 의존하고 min_points는 결과 필터링에만 쓰이므로
+            # (함수 정의 참고), 아래 clusters는 기존 한 줄 호출과 완전히
+            # 동일한 값이다(§27 -- 동작 변화 없음, 부산물로 orphans만
+            # 추가로 얻음). orphans = min_points=2에서 탈락한 고립(1포인트)
+            # 클러스터 -- 306차가 확정한 게이트 발동 후보.
+            all_clusters = route_find_clusters(candidates, distances, 1, ROUTE_CLUSTER_MAX_GAP_M)
+            clusters = [c for c in all_clusters if len(c) >= ROUTE_CLUSTER_MIN_POINTS]
+            orphans = [c for c in all_clusters if len(c) < ROUTE_CLUSTER_MIN_POINTS]
             apex_idx, apex_dist, apex_speed, apex_mode, apex_streak = self._route_cluster_continuity_step(
                 clusters, distances, speeds, v_ego_ms)
+
+            # [307차 계측] 관측용 telemetry -- apex_mode 분기와 무관하게
+            # 항상 기록(candidate telemetry와 동일 패턴, §27 제어 미사용).
+            self._route_cluster_count = len(clusters)
+            self._route_apex_mode = apex_mode
+            self._route_apex_fine_triggered = bool(fine_triggered[apex_idx]) if apex_idx != -1 else False
+            self._route_orphan_count = len(orphans)
+            if orphans:
+                orphan0_idx = orphans[0][0]
+                self._route_orphan_dist = distances[orphan0_idx]
+                self._route_orphan_speed = speeds[orphan0_idx]
+            (self._route_prov_active_pub, self._route_prov_dist_pub, self._route_prov_speed_pub,
+             self._route_prov_streak_pub, self._route_prov_match_error_pub,
+             self._route_prov_promoted_pub) = self._route_provisional_singleton_step(
+                orphans, distances, speeds, v_ego_ms)
+            self.carrot_serv.route_cluster_count = self._route_cluster_count
+            self.carrot_serv.route_apex_mode = self._route_apex_mode
+            self.carrot_serv.route_apex_fine_triggered = self._route_apex_fine_triggered
+            self.carrot_serv.route_orphan_count = self._route_orphan_count
+            self.carrot_serv.route_orphan_dist = self._route_orphan_dist
+            self.carrot_serv.route_orphan_speed = self._route_orphan_speed
+            self.carrot_serv.route_provisional_active = self._route_prov_active_pub
+            self.carrot_serv.route_provisional_dist = self._route_prov_dist_pub
+            self.carrot_serv.route_provisional_speed = self._route_prov_speed_pub
+            self.carrot_serv.route_provisional_streak = self._route_prov_streak_pub
+            self.carrot_serv.route_provisional_match_error = self._route_prov_match_error_pub
+            self.carrot_serv.route_provisional_promoted = self._route_prov_promoted_pub
 
             if apex_mode == "none" or apex_speed is None:
                 # [223차, design doc §2] 유효 apex 없음(직선 또는 continuity
@@ -1408,6 +1568,9 @@ class CarrotMan:
             self._route_cluster_locked_speed = None
             self._route_cluster_miss_frames = 0
             self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
+            self._route_prov_locked_dist = None  # [307차] shadow tracker도 동일하게 초기화
+            self._route_prov_locked_speed = None
+            self._route_prov_streak = 0
     else:
         resampled_points = []
         resampled_distances = []
@@ -1426,6 +1589,9 @@ class CarrotMan:
             self._route_cluster_locked_speed = None
             self._route_cluster_miss_frames = 0
             self._route_cluster_streak = 0  # [266차] 위 3개 필드와 동일하게 초기화
+            self._route_prov_locked_dist = None  # [307차] shadow tracker도 동일하게 초기화
+            self._route_prov_locked_speed = None
+            self._route_prov_streak = 0
         #self.params.remove("NavDestination")
 
     # [227차] carrot_serv.py::update_navi()가 ACTIVE 추적 분기(vEgo 상한

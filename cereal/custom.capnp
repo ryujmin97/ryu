@@ -105,6 +105,25 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	routePathLen @55 : Int32;          # get_path_after_distance()가 반환한 path 길이. 0이면 이번 프레임 naviPaths 공백의 직접 원인. 호출 없던 프레임은 0
 	routeNaviUpdateAgeMs @56 : Float32; # now - 마지막 self.navi_points 재대입 시각(ms). 이번 온로드 세션에서 한 번도 재대입 없었으면 -1.0
 	routeNaviUpdateCount @57 : Int32;   # self.navi_points가 재대입된 누적 횟수(빈 리스트로 클리어되는 경우 포함, 정상 수신만 세지 않음)
+
+	# [307차 계측, ANALYSIS_ONLY] 306차가 코드+합성 재현으로 확정한 가설
+	# (route_find_clusters()의 min_points=2 게이트가 고립된 1포인트 좁은
+	# 커브를 노이즈로 오인해 제거할 수 있음, ep108)을 실차 로그로 검증하기
+	# 위한 필드. 기존 필드(@0~@57)는 건드리지 않고 뒤에 append. 아래 필드
+	# 전부 제어 로직/apex 선택/판정에는 전혀 사용되지 않는 순수 관측용이다
+	# (§27 -- production 동작 자체는 이 계측 추가 전후로 동일함).
+	routeClusterCount @58 : Int32;             # route_find_clusters(min_points=2) 결과 클러스터 개수(=실제 apex 선택에 쓰이는 clusters)
+	routeApexMode @59 : Text;                  # 이번 프레임 _route_cluster_continuity_step() 반환 mode 문자열("matched"/"held"/"passed"/"lost"/"new"/"none")
+	routeApexFineTriggered @60 : Bool;         # 147차 fine 곡률 서브샘플이 이번 프레임 macro 대신 채택됐는지
+	routeOrphanSingletonCount @61 : Int32;     # min_points=1로 얻은 전체 분할 중 min_points=2 미달로 탈락한 고립 클러스터(orphan) 개수
+	routeOrphanSingletonDist @62 : Float32;    # 그중 최근접 orphan의 거리(m). orphan 없으면 0.0
+	routeOrphanSingletonSpeed @63 : Float32;   # 그중 최근접 orphan의 목표속도(km/h). orphan 없으면 0.0
+	routeProvisionalActive @64 : Bool;         # _route_provisional_singleton_step() shadow tracker가 이번 프레임 orphan을 추적 중인지
+	routeProvisionalDist @65 : Float32;        # 위 tracker가 추적 중인 고립 후보 거리(m)
+	routeProvisionalSpeed @66 : Float32;       # 위 tracker가 추적 중인 고립 후보 목표속도(km/h)
+	routeProvisionalStreak @67 : Int32;        # 위 tracker의 프레임간 연속 매칭 streak(설계안 A 승격 후보 신호, PROVISIONAL_PROMOTE_STREAK와 비교)
+	routeProvisionalMatchError @68 : Float32;  # 이번 프레임 매칭 시 |실제거리-예측거리| 오차(m). 신규 시작 프레임은 0.0
+	routeProvisionalPromoted @69 : Bool;       # streak >= PROVISIONAL_PROMOTE_STREAK(현재 3, NEEDS_VALIDATION) 여부일 뿐, 실제 승격/제어 개입은 없음
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {
