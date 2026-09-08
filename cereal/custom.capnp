@@ -124,6 +124,24 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	routeProvisionalStreak @67 : Int32;        # 위 tracker의 프레임간 연속 매칭 streak(설계안 A 승격 후보 신호, PROVISIONAL_PROMOTE_STREAK와 비교)
 	routeProvisionalMatchError @68 : Float32;  # 이번 프레임 매칭 시 |실제거리-예측거리| 오차(m). 신규 시작 프레임은 0.0
 	routeProvisionalPromoted @69 : Bool;       # streak >= PROVISIONAL_PROMOTE_STREAK(현재 3, NEEDS_VALIDATION) 여부일 뿐, 실제 승격/제어 개입은 없음
+
+	# [323차 계측] 321차가 확정한 5m/2.5m 국소 재샘플 검증을 실측 corpus
+	# 기준으로 진행하기 위한 필드(custom.capnp @70). orphans(min_points=2
+	# 미달 고립 후보)가 있는 프레임에서만, resample_10m_np() 적용 이전의
+	# 원본 relative_coords(600m lookahead 전체, get_path_after_distance()
+	# 직후 gps_to_relative_xy() 결과)를 raw XY 그대로 발행한다.
+	# naviPaths(@?, .2f 좌표+거리 3필드 포맷)와 의미가 다르므로 동일
+	# 포맷을 재사용하지 않고 "x,y;x,y;..." 2필드만 담는다(거리값은 이
+	# 시점에 아직 10m 리샘플 전이라 무의미, 지선생 검토 반영).
+	# 국소 윈도우 크롭/5m/2.5m 재계산은 여기서 하지 않고 toolkit
+	# 오프라인 스크립트에서 처리한다(§27 최소변경 -- production은
+	# orphans 유무 판정 후 그대로 직렬화만 함, 신규 계산 없음).
+	# 트리거는 orphan_count>0 단일 조건이며, 이미 발행 중인
+	# routeProvisionalStreak(@67)로 사후 A(즉시)/A∩B(streak>=3) 분류
+	# 가능하므로 별도 트리거 필드는 추가하지 않는다(WIP.md 323차 참고).
+	# 제어 로직에는 전혀 사용되지 않는 순수 관측용, orphans 없는
+	# 프레임은 빈 문자열.
+	routeOrphanRawPath @70 : Text;
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {

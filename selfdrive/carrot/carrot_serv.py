@@ -238,6 +238,12 @@ class CarrotServ:
     self.route_provisional_streak = 0
     self.route_provisional_match_error = 0.0
     self.route_provisional_promoted = False
+    # [323차 계측] custom.capnp @70. carrot_man.py가 orphans 확정 직후
+    # (orphans 있을 때만) relative_coords를 raw XY로 직렬화해 이 속성에
+    # 써준다(위 route_orphan_*/route_provisional_*과 동일 패턴). 5m/2.5m
+    # 재샘플 검증(WIP.md 321차 이월 항목)을 위한 순수 관측용, 제어
+    # 로직에는 사용되지 않음.
+    self.route_orphan_raw_path = ""
 
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
@@ -1415,6 +1421,8 @@ class CarrotServ:
     msg.carrotMan.routeProvisionalStreak = int(self.route_provisional_streak)
     msg.carrotMan.routeProvisionalMatchError = float(self.route_provisional_match_error)
     msg.carrotMan.routeProvisionalPromoted = bool(self.route_provisional_promoted)
+    # [323차 계측] custom.capnp @70, 위와 동일 패턴(그대로 담기만 함).
+    msg.carrotMan.routeOrphanRawPath = str(self.route_orphan_raw_path)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')

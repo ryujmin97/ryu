@@ -984,6 +984,11 @@ class CarrotMan:
     self._route_prov_streak_pub = 0
     self._route_prov_match_error_pub = 0.0
     self._route_prov_promoted_pub = False
+    # [323차 계측] 위 193/204/305/307차와 동일 패턴 -- 매 호출 sentinel로
+    # 초기화(빈 문자열), orphans 없는/계산부에 도달 못한 프레임(조기
+    # return 포함)에서 직전 프레임 값이 잔류하지 않도록 한다. 제어
+    # 로직에는 전혀 사용되지 않는 순수 관측용(custom.capnp @70 참고).
+    self._route_orphan_raw_path = ""
     self.carrot_serv.route_cluster_count = 0
     self.carrot_serv.route_apex_mode = ""
     self.carrot_serv.route_apex_fine_triggered = False
@@ -996,6 +1001,7 @@ class CarrotMan:
     self.carrot_serv.route_provisional_streak = 0
     self.carrot_serv.route_provisional_match_error = 0.0
     self.carrot_serv.route_provisional_promoted = False
+    self.carrot_serv.route_orphan_raw_path = ""  # [323차 계측] 위와 동일 sentinel 패턴
 
     # [223차, 신규 -- design doc §0/§3] route_enabled = Parameter에 Route가
     # 포함되어 있는가(mode 2/3). Mode 0/1이면 curve search/apex 선택/감속
@@ -1382,6 +1388,14 @@ class CarrotMan:
                 orphan0_idx = orphans[0][0]
                 self._route_orphan_dist = distances[orphan0_idx]
                 self._route_orphan_speed = speeds[orphan0_idx]
+                # [323차 계측] 5m/2.5m 국소 재샘플 실측 검증(WIP.md 321차
+                # 이월 항목)을 위해, resample_10m_np() 적용 이전 원본
+                # relative_coords(600m lookahead 전체)를 raw XY로 직렬화.
+                # naviPaths와 달리 거리 필드 없이 2필드만(지선생 검토
+                # 반영) -- 신규 계산/윈도우 크롭 없이 이미 존재하는
+                # relative_coords를 그대로 문자열화만 함(§27).
+                self._route_orphan_raw_path = ";".join(
+                    f"{x:.2f},{y:.2f}" for x, y in relative_coords)
             (self._route_prov_active_pub, self._route_prov_dist_pub, self._route_prov_speed_pub,
              self._route_prov_streak_pub, self._route_prov_match_error_pub,
              self._route_prov_promoted_pub) = self._route_provisional_singleton_step(
@@ -1398,6 +1412,7 @@ class CarrotMan:
             self.carrot_serv.route_provisional_streak = self._route_prov_streak_pub
             self.carrot_serv.route_provisional_match_error = self._route_prov_match_error_pub
             self.carrot_serv.route_provisional_promoted = self._route_prov_promoted_pub
+            self.carrot_serv.route_orphan_raw_path = self._route_orphan_raw_path
 
             if apex_mode == "none" or apex_speed is None:
                 # [223차, design doc §2] 유효 apex 없음(직선 또는 continuity
