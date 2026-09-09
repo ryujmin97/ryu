@@ -142,6 +142,17 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	# 제어 로직에는 전혀 사용되지 않는 순수 관측용, orphans 없는
 	# 프레임은 빈 문자열.
 	routeOrphanRawPath @70 : Text;
+
+	# [334차 계측] carrot_man.py route_local_curve_merge() 국소(2.5m)
+	# 재계산 병합이 이번 프레임에 실제로 채택됐는지(True) 아니면 10m
+	# 원본 결과가 그대로 통과했는지(False)를 그대로 노출한다. 기존
+	# self._route_local_resample_used 내부 변수(328차)를 최초로 cereal에
+	# 노출하는 것 -- 333/334차에서 offline replay 예측(100% True)과
+	# 실측 orphan telemetry의 10m-grid 정황(병합 미발동 시사)이 정반대로
+	# 갈리는 구조적 불일치가 발견됐고, 원인을 로그만으로 확정할 수 없어
+	# (코드/입력값은 배제 완료, WIP.md/FINDINGS.md 334차 참고) 직접 계측이
+	# 필요해 추가함. 제어 로직에는 전혀 사용되지 않는 순수 관측용.
+	routeLocalResampleUsed @71 : Bool;
 }
 
 struct CustomReserved1 @0xaedffd8f31e7b55d {

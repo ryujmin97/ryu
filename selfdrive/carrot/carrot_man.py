@@ -1265,6 +1265,10 @@ class CarrotMan:
     # return 포함)에서 직전 프레임 값이 잔류하지 않도록 한다. 제어
     # 로직에는 전혀 사용되지 않는 순수 관측용(custom.capnp @70 참고).
     self._route_orphan_raw_path = ""
+    # [334차 계측] custom.capnp @71. 위 route_orphan_raw_path(@70)와 동일
+    # sentinel 패턴 -- 매 호출 False로 초기화해, 국소 재계산 블록 자체가
+    # 실행되지 않는 프레임에 직전 프레임 값이 잔류하지 않도록 한다.
+    self.carrot_serv.route_local_resample_used = False
     self.carrot_serv.route_cluster_count = 0
     self.carrot_serv.route_apex_mode = ""
     self.carrot_serv.route_apex_fine_triggered = False
@@ -1625,6 +1629,9 @@ class CarrotMan:
             self.carrot_serv.route_provisional_match_error = self._route_prov_match_error_pub
             self.carrot_serv.route_provisional_promoted = self._route_prov_promoted_pub
             self.carrot_serv.route_orphan_raw_path = self._route_orphan_raw_path
+            # [334차 계측] custom.capnp @71 -- route_local_curve_merge()
+            # 반환값을 그대로 노출(위와 동일 패턴, 신규 계산 없음, §27).
+            self.carrot_serv.route_local_resample_used = bool(self._route_local_resample_used)
 
             if apex_mode == "none" or apex_speed is None:
                 # [223차, design doc §2] 유효 apex 없음(직선 또는 continuity

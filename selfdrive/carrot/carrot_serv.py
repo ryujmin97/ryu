@@ -244,6 +244,10 @@ class CarrotServ:
     # 재샘플 검증(WIP.md 321차 이월 항목)을 위한 순수 관측용, 제어
     # 로직에는 사용되지 않음.
     self.route_orphan_raw_path = ""
+    # [334차 계측] custom.capnp @71. 위 route_orphan_raw_path(@70)와 동일
+    # 패턴 -- carrot_man.py route_local_curve_merge() 반환값을 그대로
+    # 담기만 함(순수 관측용, 제어 로직 미사용).
+    self.route_local_resample_used = False
 
     self.phone_gps_accuracy = 0.0
     self.gps_accuracy_device = 0.0
@@ -1423,6 +1427,8 @@ class CarrotServ:
     msg.carrotMan.routeProvisionalPromoted = bool(self.route_provisional_promoted)
     # [323차 계측] custom.capnp @70, 위와 동일 패턴(그대로 담기만 함).
     msg.carrotMan.routeOrphanRawPath = str(self.route_orphan_raw_path)
+    # [334차 계측] custom.capnp @71, 위와 동일 패턴(그대로 담기만 함).
+    msg.carrotMan.routeLocalResampleUsed = bool(self.route_local_resample_used)
     pm.send('carrotMan', msg)
 
     inst = messaging.new_message('navInstructionCarrot')
