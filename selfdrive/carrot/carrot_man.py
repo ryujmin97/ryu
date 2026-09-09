@@ -206,6 +206,37 @@ ROUTE_RELEASE_DIST_M = 10.0
 # devnotes PARAMS_REGISTRY.md 참고).
 ROUTE_CLUSTER_MIN_POINTS = 2
 ROUTE_CLUSTER_MAX_GAP_M = 40.0
+
+# [328차, devnotes WIP.md 326/327차가 확정한 설계] 10m grid quantization이
+# 단일 곡선을 매 리샘플 지점마다 단발 candidate로 재등록만 시켜(min_points
+# 미충족) 전혀 cluster로 승격되지 못하는 사례(327차 ep3 실차 실측, 약
+# 7.5초/14회 반복)와 10m/5m는 놓치고 2.5m만 검출하는 좁은 apex(325차
+# ep4 구간2 실측)를 보정하기 위해, 10m 1차 패스에서 orphan(=클러스터 미달
+# 고립 후보, 306차/323차가 이미 이 신호를 orphan raw path 계측
+# 트리거(orphan_count>0 단일조건, e2f2282, FINDINGS.md 323차)로 채택한
+# 전례를 그대로 재사용)가 발생한 지점 주변 국소 구간만 2.5m로 재계산해
+# 10m 결과에 병합한다. ROUTE_CLUSTER_MAX_GAP_M/MIN_POINTS, continuity(§7
+# _route_cluster_continuity_step), ACTIVE 상태기계, autoNaviSpeedDecelRate
+# 등은 전부 무변경 -- 이 블록은 apex 판정에 들어가는 "지오메트리 입력"만
+# 국소적으로 촘촘하게 만들 뿐이다(326차 확정 설계도 참고).
+# 아래 4개 값은 326차 "미확정 2~5번" 중 실차 검증 전 1차 후보값(사용자
+# 결정, 소요시간 문제로 계측선행 사이클 생략 -- WIP.md 326차 4번). 이
+# 세션에서 production 최종값으로 확정하는 것이 아니라 실차 로그로 문제가
+# 보이면 다음 커밋에서 조정할 1차 후보임을 명시(§28/§29).
+LOCAL_CURVE_DISTANCE_INTERVAL = 2.5
+# macro half-chord 40m을 10m grid(sample=4)와 동일하게 보존하려면
+# sample=16(16*2.5=40.0m). fine half-chord 10m 보존은 sample=4
+# (4*2.5=10.0m, 기존 ROUTE_CURVATURE_FINE_SAMPLE=1*10.0m과 동일 크기).
+LOCAL_CURVE_MACRO_SAMPLE = 16
+LOCAL_CURVE_FINE_SAMPLE = 4
+# orphan 지점 앞/뒤로 몇 m를 국소 2.5m 재계산 대상에 포함할지 -- macro
+# half-chord(40m)와 동일한 값으로 1차 설정(326차 1차안이 실측했던 물리적
+# chord 크기 감각을 재사용, 임의 신규값 도입 지양 -- §27). ep3(327차)
+# 실측상 churn이 프레임마다 새 orphan 지점을 만들어냈으므로(매 프레임
+# 재계산되는 무상태 구조), 다음 프레임에는 window가 자동으로 재중심되어
+# 특정 구간을 놓치지 않을 것으로 기대되나 이번 세션에는 미검증(다음 작업).
+LOCAL_CURVE_WINDOW_BACK_M = 40.0
+LOCAL_CURVE_WINDOW_FWD_M = 40.0
 # [307차 계측, NEEDS_VALIDATION] 306차가 확정한 min_points=2 게이트의
 # 구조적 취약점(고립된 1포인트 좁은 커브가 노이즈로 오인되어 제거될 수
 # 있음)을 실차 로그로 검증하기 위한 설계안 A(시간적 continuity 승격)
@@ -455,6 +486,205 @@ def calculate_curvature(p1, p2, p3):
 
     #curvature_cache[key] = curvature
     return curvature
+
+
+# [328차 신규] 기존 carrot_navi_route() 본문에 인라인돼 있던 macro/fine
+# curvature 계산(213차/269차/279차/307차가 쌓아온 로직, 위 macro-loop
+# 주석 참고)을 순수 함수로 추출 -- 동작은 완전히 동일(입력 순서/연산
+# 순서 무변경, distance_interval=10.0/sample=4/sample_fine=1/
+# distance_offset=0.0로 호출하면 기존 코드와 byte-identical 결과)하고,
+# 아래 국소 2.5m 재계산(_route_local_curve_windows)에서 동일 함수를
+# distance_interval=2.5로 재사용하기 위함(§27, 로직 복제 대신 공유).
+# [213차 계승] distance 초기값은 "선증가(pre-increment)" 구조 때문에
+# distance_offset - distance_interval로 둬야 distances[0]==distance_offset
+# 이 된다(326차 미확정 5번 -- distance=-10.0 하드코딩을
+# -distance_interval로 일반화).
+def route_curvature_macro_fine(resampled_points, distance_interval, sample,
+                                sample_fine, distance_offset,
+                                map_turn_speed_factor, road_limit_speed):
+    curvatures = []
+    distances = []
+    fine_triggered = []
+    if len(resampled_points) < sample * 2 + 1:
+        return curvatures, distances, [], fine_triggered
+
+    distance = distance_offset - distance_interval
+    macro_abs_curv = []
+    for i in range(len(resampled_points) - sample * 2):
+        distance += distance_interval
+        p1, p2, p3 = resampled_points[i], resampled_points[i + sample], resampled_points[i + sample * 2]
+        curvature = calculate_curvature(p1, p2, p3)
+        curvatures.append(curvature)
+        macro_abs_curv.append(abs(curvature))
+        distances.append(distance)
+
+    macro_speeds_arr = np.interp(macro_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+    macro_speeds_arr = macro_speeds_arr * map_turn_speed_factor
+    speeds = []
+    for i in range(len(curvatures)):
+        speed = macro_speeds_arr[i]
+        if macro_abs_curv[i] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
+            speed = max(speed, road_limit_speed)
+        speeds.append(speed)
+
+    fine_triggered = [False] * len(speeds)
+    if sample_fine and sample_fine < sample and len(resampled_points) >= sample_fine * 2 + 1:
+        n_fine = min(len(distances), len(resampled_points) - sample_fine * 2)
+        if n_fine > 0:
+            fine_curvatures = []
+            fine_abs_curv = []
+            for i in range(n_fine):
+                p1, p2, p3 = resampled_points[i], resampled_points[i + sample_fine], resampled_points[i + sample_fine * 2]
+                f_curvature = calculate_curvature(p1, p2, p3)
+                fine_curvatures.append(f_curvature)
+                fine_abs_curv.append(abs(f_curvature))
+            fine_speeds_arr = np.interp(fine_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
+            fine_speeds_arr = fine_speeds_arr * map_turn_speed_factor
+            for j in range(n_fine):
+                f_curv = fine_curvatures[j]
+                f_speed = fine_speeds_arr[j]
+                if fine_abs_curv[j] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
+                    f_speed = max(f_speed, road_limit_speed)
+                if f_speed < speeds[j]:
+                    speeds[j] = f_speed
+                    curvatures[j] = f_curv
+                    fine_triggered[j] = True
+    return curvatures, distances, speeds, fine_triggered
+
+
+# [328차 신규] relative_coords(원본 연속 경로, resample 이전)에서
+# 누적거리[d_start, d_end] 구간만 arclength 보간으로 잘라낸다.
+# resample_10m_np()와 동일한 누적거리 계산을 재사용(§27, 로직 복제
+# 최소화)하되 output은 리샘플이 아니라 원본 밀도 그대로의 부분경로 --
+# 이후 이 부분경로를 resample_10m_np(local_path, 2.5)에 다시 넣어 국소
+# 2.5m grid를 만든다.
+def route_crop_path_by_distance(points_xy, d_start, d_end):
+    pts = np.asarray(points_xy, dtype=np.float64)
+    if len(pts) < 2:
+        return []
+    seg_vec = np.diff(pts, axis=0)
+    seg_len = np.hypot(seg_vec[:, 0], seg_vec[:, 1])
+    cum_len = np.concatenate(([0.0], np.cumsum(seg_len)))
+    total_len = cum_len[-1]
+    if total_len <= 0:
+        return []
+    d_start = max(0.0, d_start)
+    d_end = min(total_len, d_end)
+    if d_end - d_start < 1.0:
+        # [328차] 1m 미만 구간은 국소 재계산 자체가 무의미(2.5m grid보다
+        # 짧음) -- 호출부가 빈 리스트를 받으면 해당 window를 건너뛴다.
+        return []
+
+    def _interp_at(d):
+        idx = np.searchsorted(cum_len, d, side="right") - 1
+        idx = int(np.clip(idx, 0, len(seg_len) - 1))
+        seg_l = seg_len[idx]
+        t = 0.0 if seg_l <= 0 else (d - cum_len[idx]) / seg_l
+        return pts[idx] + (pts[idx + 1] - pts[idx]) * t
+
+    start_pt = _interp_at(d_start)
+    end_pt = _interp_at(d_end)
+    inner_mask = (cum_len > d_start) & (cum_len < d_end)
+    out = [tuple(start_pt)]
+    for p in pts[inner_mask]:
+        out.append(tuple(p))
+    out.append(tuple(end_pt))
+    return out
+
+
+# [328차 신규] 10m 1차 패스의 orphan 지점들 주변에 국소 2.5m window를
+# 만들고(겹치면 병합), 그 구간만 route_curvature_macro_fine()으로
+# 재계산해 10m 결과와 병합한다. 반환된 distances/speeds/curvatures/
+# fine_triggered는 window 밖은 10m 그대로, window 안은 2.5m로 대체된
+# 오름차순 배열 -- 이후 route_find_clusters()/apex continuity 등 기존
+# 로직에 그대로 투입한다(326차 확정 설계 다이어그램, 상태기계 자체는
+# 무변경 -- 입력 지오메트리만 국소적으로 촘촘해짐).
+def route_local_curve_merge(orphans, distances, speeds, curvatures,
+                             fine_triggered, relative_coords,
+                             map_turn_speed_factor, road_limit_speed):
+    if not orphans:
+        return distances, speeds, curvatures, fine_triggered, False
+
+    windows = []
+    for orphan_cluster in orphans:
+        idx0 = orphan_cluster[0]
+        center = distances[idx0]
+        windows.append((center - LOCAL_CURVE_WINDOW_BACK_M,
+                         center + LOCAL_CURVE_WINDOW_FWD_M))
+    windows.sort()
+    merged_windows = []
+    for ws, we in windows:
+        if merged_windows and ws <= merged_windows[-1][1]:
+            merged_windows[-1] = (merged_windows[-1][0], max(merged_windows[-1][1], we))
+        else:
+            merged_windows.append((ws, we))
+
+    out_d, out_s, out_c, out_ft = [], [], [], []
+    for i, d in enumerate(distances):
+        if not any(ws <= d <= we for ws, we in merged_windows):
+            out_d.append(d)
+            out_s.append(speeds[i])
+            out_c.append(curvatures[i])
+            out_ft.append(fine_triggered[i])
+
+    local_used = False
+    for ws, we in merged_windows:
+        local_path = route_crop_path_by_distance(relative_coords, ws, we)
+        if len(local_path) < 2:
+            # [328차] window이 path 시작/끝단에 가까워 crop 결과가 1m
+            # 미만/포인트부족으로 비게 되는 경우 -- 아래 두 fallback과
+            # 동일하게 원본 10m 포인트를 복원한다(고치기 전에는 여기서만
+            # 그냥 continue해 orphan 포인트가 조용히 소실되는 버그가
+            # 있었음, 이번 세션 합성테스트로 발견/수정, §28).
+            for i, d in enumerate(distances):
+                if ws <= d <= we:
+                    out_d.append(d)
+                    out_s.append(speeds[i])
+                    out_c.append(curvatures[i])
+                    out_ft.append(fine_triggered[i])
+            continue
+        local_resampled = resample_10m_np(local_path, LOCAL_CURVE_DISTANCE_INTERVAL)
+        if len(local_resampled) < LOCAL_CURVE_MACRO_SAMPLE * 2 + 1:
+            # [328차] 이 window가 국소 2.5m macro chord(40m)를 채우기에도
+            # 너무 짧음(경로 끝자락 등) -- 10m 결과를 그대로 둔다(위에서
+            # 이미 제거했으므로, 여기서 아무것도 추가하지 않으면 그 구간의
+            # apex 후보가 통째로 사라진다 -- 이는 의도하지 않은 동작이므로
+            # 원본 10m 포인트를 되살린다).
+            for i, d in enumerate(distances):
+                if ws <= d <= we:
+                    out_d.append(d)
+                    out_s.append(speeds[i])
+                    out_c.append(curvatures[i])
+                    out_ft.append(fine_triggered[i])
+            continue
+        l_curv, l_dist, l_speed, l_ft = route_curvature_macro_fine(
+            local_resampled, LOCAL_CURVE_DISTANCE_INTERVAL,
+            LOCAL_CURVE_MACRO_SAMPLE, LOCAL_CURVE_FINE_SAMPLE, ws,
+            map_turn_speed_factor, road_limit_speed)
+        if not l_dist:
+            for i, d in enumerate(distances):
+                if ws <= d <= we:
+                    out_d.append(d)
+                    out_s.append(speeds[i])
+                    out_c.append(curvatures[i])
+                    out_ft.append(fine_triggered[i])
+            continue
+        out_d.extend(l_dist)
+        out_s.extend(l_speed)
+        out_c.extend(l_curv)
+        out_ft.extend(l_ft)
+        local_used = True
+
+    if not local_used:
+        return distances, speeds, curvatures, fine_triggered, False
+
+    order = sorted(range(len(out_d)), key=lambda i: out_d[i])
+    merged_d = [out_d[i] for i in order]
+    merged_s = [out_s[i] for i in order]
+    merged_c = [out_c[i] for i in order]
+    merged_ft = [out_ft[i] for i in order]
+    return merged_d, merged_s, merged_c, merged_ft, True
+
 
 # [247차/251차, design doc §10] stage2 공간 클러스터링 -- idxs(거리
 # 오름차순 후보 인덱스)를 인접 gap<=max_gap_m인 런으로 묶는다.
@@ -975,6 +1205,13 @@ class CarrotMan:
     self._route_cluster_count = 0
     self._route_apex_mode = ""
     self._route_apex_fine_triggered = False
+    # [328차] 위와 동일 패턴 -- 국소 2.5m 재계산 병합 블록 자체가
+    # 실행되지 않는 프레임(조기 return, orphan 없음, path 없음 등)에
+    # 직전 프레임 값이 잔류하지 않도록 매 호출 sentinel로 초기화.
+    # 제어 로직에는 사용되지 않는 순수 내부 디버그용 속성(cereal 미발행,
+    # 328차는 orphan_count/cluster_count/apex_mode 기존 telemetry의
+    # 변화로 간접 관측 -- 신규 cereal 필드 추가는 다음 세션 검토).
+    self._route_local_resample_used = False
     self._route_orphan_count = 0
     self._route_orphan_dist = 0.0
     self._route_orphan_speed = 0.0
@@ -1158,115 +1395,26 @@ class CarrotMan:
         resampled_points = resample_10m_np(relative_coords, distance_interval)
         resampled_distances = [i * distance_interval for i in range(len(resampled_points))]
 
-        curvatures = []
-        distances = []
-        # [213차, 212차 A안 채택] distance=10.0 선증가(pre-increment) 구조
-        # 때문에 i=0(=거의 차량 현재 위치)이 무조건 20.0m로 찍히던 하드플로어
-        # 제거. 루프 본문이 append 직전에 매번 distance_interval(10.0)을
-        # 먼저 더하므로, distances[i]가 정확히 i*10.0이 되게 하려면 초기값을
-        # -10.0으로 둬야 한다(i=0: -10+10=0.0, i=1: 0+10=10.0, ...).
-        # resampled_points[0]==start_point(get_path_after_distance()가 계산한
-        # 현재 위치와 가장 가까운 경로점)이므로 i=0 -> 0.0m가 맞다.
-        distance = -10.0
         sample = 4
+        # [213차, 212차 A안 채택 -- 로직은 route_curvature_macro_fine()으로
+        # 이전, 328차] i=0(=거의 차량 현재 위치)이 무조건 20.0m로 찍히던
+        # 하드플로어 제거를 위해 pre-increment 시작값을 distance_offset(=
+        # 이 1차 10m 패스에서는 0.0) - distance_interval로 둔다(i=0:
+        # 0-10+10=0.0, i=1: 0+10=10.0, ... -- resampled_points[0]==
+        # start_point이므로 i=0 -> 0.0m가 맞다).
+        # [269차 Phase1, devnotes toolkit/perf_route_269_curvature_batch_optimize.py
+        # self-test 10종 시나리오 PASS로 macro np.interp 배치화/거리계산
+        # 동일성 확인] [279차] mapTurnSpeedFactor 적용 위치(V_CURVE_LOOKUP_VALS
+        # 결과에 곱함, §4 vEgo 상한 불변식과 무관) [147차] fine chord
+        # 보조샘플로 매크로가 놓치는 좁은 코너 보정, 매크로 결과 자체는
+        # 대체하지 않음 [307차] fine_triggered는 관측용, 제어 미사용 --
+        # 위 모든 결정은 아래 함수 내부에 그대로 보존됨(§27, 328차는
+        # "국소 2.5m 재사용을 위한 순수 추출"만 수행, 산식 변경 없음).
+        curvatures, distances, speeds, fine_triggered = route_curvature_macro_fine(
+            resampled_points, distance_interval, sample, ROUTE_CURVATURE_FINE_SAMPLE,
+            0.0, self.carrot_serv.mapTurnSpeedFactor, self.carrot_serv.nRoadLimitSpeed)
+
         if len(resampled_points) >= sample * 2 + 1:
-            # [269차 Phase1, devnotes toolkit/perf_route_269_curvature_batch_optimize.py
-            # self-test 10종 시나리오(경계값 포함) 전부 PASS로 아래 3개
-            # 변경이 원본과 출력 100% 동일함을 확인한 뒤 적용:
-            # (1) np.interp를 매 반복 스칼라 호출하지 않고 curvature를
-            #     먼저 리스트로 모아 macro 1회만 배치 호출 -- 원소별
-            #     독립 선형보간이라 배치화해도 결과값 변화 없음.
-            # Calculate curvatures based on curvature (speed는 배치 interp 이후)
-            macro_abs_curv = []
-            for i in range(len(resampled_points) - sample * 2):
-                distance += distance_interval
-                p1, p2, p3 = resampled_points[i], resampled_points[i + sample], resampled_points[i + sample * 2]
-                curvature = calculate_curvature(p1, p2, p3)
-                curvatures.append(curvature)
-                macro_abs_curv.append(abs(curvature))
-                distances.append(distance)
-
-            macro_speeds_arr = np.interp(macro_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
-            # [279차, 사용자 요청 -- MapTurnSpeedFactor 부활] 210차가 제거한
-            # 곱셈(carrot_serv.py 구 calculate_current_speed 경로, 그 계산
-            # 자체가 223차 이후 완전히 폐기됨)을 그대로 되살리는 대신,
-            # 현재(258/266차) route 아키텍처의 진짜 "apex 목표속도" 산출
-            # 지점인 여기(V_CURVE_LOOKUP_VALS 곡률->속도 테이블 결과)에
-            # 새로 연결한다. mapTurnSpeedFactor>1이면 route가 산출하는 커브
-            # 목표속도 자체가 올라가 route 개입(감속)이 약해지고(더 높은
-            # 값에서 road_limit_speed 후보 제외 가능), <1이면 더 많이
-            # 줄어든다(UI 설명 "작을수록 경로에 따라 속도가 많이 줄어듦"과
-            # 정합). vEgo 상한 불변식(§4)은 이 지점과 무관 -- out_speed는
-            # 여전히 뒤쪽 ACTIVE/INERT 게이트(carrot_man.py 1180번대)에서
-            # v_ego_ms 기준으로만 클램프되므로, 여기서 목표속도를 올려도
-            # "route가 vEgo보다 빠른 속도를 명령"하는 210차류 회귀는
-            # 재발하지 않는다(목표속도가 vEgo를 넘으면 그 지점은 애초에
-            # candidates에서 제외되거나 INERT `v_ego_ms<=target_ms` 분기로
-            # 빠짐, §4 계승).
-            macro_speeds_arr = macro_speeds_arr * self.carrot_serv.mapTurnSpeedFactor
-            speeds = []
-            for i in range(len(curvatures)):
-                speed = macro_speeds_arr[i]
-                if macro_abs_curv[i] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
-                    speed = max(speed, self.carrot_serv.nRoadLimitSpeed)
-                speeds.append(speed)
-
-            # [307차 계측] 이번 프레임 각 지점의 speed가 147차 fine-sample
-            # 보정으로 macro 대비 더 급하게 대체됐는지 표시하는 관측용
-            # 배열 -- fine 블록 실행 여부와 무관하게 항상 정의(미실행/
-            # 미대체 지점은 False 유지). 아래 override 루프 밖에서 먼저
-            # 초기화해야 fine 블록이 스킵되는 프레임(sample_fine 조건
-            # 미충족)에서도 길이가 speeds와 항상 일치한다. 제어 로직에는
-            # 사용되지 않음(§27).
-            fine_triggered = [False] * len(speeds)
-
-            # [147차] 미세(fine) chord 보조 샘플 -- 위 매크로(sample=4,
-            # 40m) 루프가 놓치는 좁은 코너(예: 교차로 우회전)를 보정.
-            # 같은 리샘플 폴리라인에 ROUTE_CURVATURE_FINE_SAMPLE(기본
-            # 10m) 간격으로 3점 곡률을 한 번 더 계산해, 같은 거리
-            # 위치에서 더 급한(=speed가 더 낮은) 쪽만 채택한다. 매크로
-            # 결과 자체를 대체하지 않으므로 장거리 lookahead 매크로
-            # 형상(직선 오탐 방지)은 그대로 유지된다.
-            #
-            # [269차 Phase1, 위 perf_route_269 self-test로 확인] macro와
-            # fine 거리그리드는 둘 다 distance=-10.0에서 시작해
-            # distance_interval씩 lock-step 증가하므로 fine_points[j]는
-            # distances[j]와 항상 정확히 같은 지점을 가리킨다 -- 원본의
-            # "가장 가까운 fine 포인트 순차탐색"은 매 j에서 결국 fine_idx=j
-            # 그 자체를 고르는 것과 100% 동일한 결과였다(탐색이 필요한
-            # 상황 자체가 발생하지 않음). 따라서 (2) fine 계산량을
-            # len(distances)개로 제한(뒷단에서 안 쓰는 나머지 계산 삭제)
-            # 하고 (3) 탐색용 (distance, curvature, speed) 튜플 리스트
-            # 대신 curvature만 담은 리스트로 바로 인덱스 정렬 병합한다.
-            # (4) np.interp도 macro와 동일하게 배치 1회로 통합.
-            sample_fine = ROUTE_CURVATURE_FINE_SAMPLE
-            if sample_fine and sample_fine < sample and len(resampled_points) >= sample_fine * 2 + 1:
-                # [213차, 위 macro distance와 동일 이유] 20m 하드플로어 제거.
-                n_fine = min(len(distances), len(resampled_points) - sample_fine * 2)
-                if n_fine > 0:
-                    fine_curvatures = []
-                    fine_abs_curv = []
-                    for i in range(n_fine):
-                        p1, p2, p3 = resampled_points[i], resampled_points[i + sample_fine], resampled_points[i + sample_fine * 2]
-                        f_curvature = calculate_curvature(p1, p2, p3)
-                        fine_curvatures.append(f_curvature)
-                        fine_abs_curv.append(abs(f_curvature))
-                    fine_speeds_arr = np.interp(fine_abs_curv, V_CURVE_LOOKUP_BP, V_CRUVE_LOOKUP_VALS)
-                    # [279차] macro와 동일하게 fine 쪽에도 mapTurnSpeedFactor
-                    # 적용 -- 안 그러면 fine이 더 급한 지점만 골라 채택하는
-                    # 로직(아래 "f_speed < speeds[j]"만 교체)에서 factor
-                    # 적용 전 값과 적용 후 값이 뒤섞여 비교당해 일관성이
-                    # 깨진다(§27, macro/fine 동일 배율 유지가 최소변경).
-                    fine_speeds_arr = fine_speeds_arr * self.carrot_serv.mapTurnSpeedFactor
-                    for j in range(n_fine):
-                        f_curv = fine_curvatures[j]
-                        f_speed = fine_speeds_arr[j]
-                        if fine_abs_curv[j] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
-                            f_speed = max(f_speed, self.carrot_serv.nRoadLimitSpeed)
-                        if f_speed < speeds[j]:
-                            speeds[j] = f_speed
-                            curvatures[j] = f_curv
-                            fine_triggered[j] = True  # [307차 계측] 관측용, 제어 미사용
             #print(f"curvatures= {[round(s, 4) for s in curvatures]}")
             #print(f"speeds= {[round(s, 1) for s in speeds]}")
             # [160차, 사용자 설계 전면 교체 -- 곡선_가감속_코딩.txt +
@@ -1375,6 +1523,31 @@ class CarrotMan:
             all_clusters = route_find_clusters(candidates, distances, 1, ROUTE_CLUSTER_MAX_GAP_M)
             clusters = [c for c in all_clusters if len(c) >= ROUTE_CLUSTER_MIN_POINTS]
             orphans = [c for c in all_clusters if len(c) < ROUTE_CLUSTER_MIN_POINTS]
+
+            # [328차 신규, devnotes WIP.md 326/327차 확정 설계] 10m 1차
+            # 패스의 orphan(=고립 후보, min_points 미달)이 하나라도 있으면
+            # (트리거: orphan_count>0 단일조건 -- 323차가 routeOrphanRawPath
+            # 계측에서 이미 채택/실측검증한 조건과 동일 재사용) 그 지점
+            # 주변만 국소 2.5m로 재계산해 병합한다. clusters/orphans/
+            # candidates 이하 모든 하류 로직(apex continuity, telemetry,
+            # provisional singleton, ACTIVE 게이트)은 전혀 손대지 않고
+            # 입력 배열만 국소적으로 촘촘한 값으로 바뀐다(§27). 병합
+            # 실패/불필요(local_used=False)면 10m 결과 그대로 통과.
+            (distances, speeds, curvatures, fine_triggered,
+             self._route_local_resample_used) = route_local_curve_merge(
+                orphans, distances, speeds, curvatures, fine_triggered,
+                relative_coords, self.carrot_serv.mapTurnSpeedFactor, road_limit_speed)
+            if self._route_local_resample_used:
+                # [328차] 병합된 배열 기준으로 candidates/clusters/orphans를
+                # 다시 계산 -- 위 stage0 candidate telemetry(route_candidate0
+                # ~2)는 이미 발행 끝난 10m 원본 기준이라 재발행하지 않는다
+                # (223차 design doc §2 "stage0은 클러스터링 이전 원본 후보
+                # 기준" 원칙 유지, 기존 분석 스크립트 호환).
+                candidates = [k for k in range(len(speeds)) if speeds[k] < road_limit_speed]
+                all_clusters = route_find_clusters(candidates, distances, 1, ROUTE_CLUSTER_MAX_GAP_M)
+                clusters = [c for c in all_clusters if len(c) >= ROUTE_CLUSTER_MIN_POINTS]
+                orphans = [c for c in all_clusters if len(c) < ROUTE_CLUSTER_MIN_POINTS]
+
             apex_idx, apex_dist, apex_speed, apex_mode, apex_streak = self._route_cluster_continuity_step(
                 clusters, distances, speeds, v_ego_ms)
 
