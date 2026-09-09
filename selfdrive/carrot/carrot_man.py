@@ -1404,7 +1404,16 @@ class CarrotMan:
     # apexIdx flicker/게이트 재설계와 함께 이 변경의 A/B(실차로그 기준
     # naviPointsActive 활성 구간의 프레임당 apexIdx 변경 빈도, 215차가 쓴
     # 지표와 동일)를 반드시 대조할 것.**
-    route_lookahead_m = 600.0
+    # [336차] 600.0 -> 300.0. 위 1395~1406 주석이 기록한 "600m 확장의
+    # A/B 실차 대조가 필요하다"는 전제 검증은 이 세션에서 별도로
+    # 수행되지 않았다(§28 -- 이 세션은 그 검증을 하지 않았다는 사실만
+    # 명확히 기록). 300m 축소 결정 자체의 근거는 이 세션 밖(사용자가
+    # 지선생[ChatGPT]과 진행한 별도 세션)에서 나온 것으로 전달받았으며,
+    # devnotes(WIP.md)에는 그 근거 세션의 상세 분석 기록이 아직 없다 --
+    # 사용자 확인 후 그대로 적용, 다른 route 로직(ACTIVE 상태기계,
+    # continuity, candidate/cluster, apex, route_local_curve_merge(),
+    # route 감속식, autoNaviSpeedDecelRate)은 전혀 변경하지 않음(§27).
+    route_lookahead_m = 300.0
     # [305차 계측] 원래 코드는 `get_path_after_distance(self.navi_points_start_index,
     # self.navi_points, ...)` 호출 인자로 두 attribute를 그 자리에서 순서대로
     # 읽었다(먼저 navi_points_start_index, 그다음 navi_points) -- 다른 스레드
