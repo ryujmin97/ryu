@@ -237,6 +237,13 @@ LOCAL_CURVE_FINE_SAMPLE = 4
 # 특정 구간을 놓치지 않을 것으로 기대되나 이번 세션에는 미검증(다음 작업).
 LOCAL_CURVE_WINDOW_BACK_M = 40.0
 LOCAL_CURVE_WINDOW_FWD_M = 40.0
+# [329차 신규] route_curvature_macro_fine()이 macro chord 1개를 채우는 데
+# 필요한 물리적 길이(=2*MACRO_SAMPLE*DISTANCE_INTERVAL=80m). window
+# 폭(BACK_M+FWD_M=80m)과 우연히 같은 값이라 328차 설계는 context/
+# replacement 여유가 0이었다(329차 실측으로 확인, WIP.md 329차). 이
+# 값만큼 crop(context)을 replacement 범위보다 넓게 잡는다 --
+# route_local_curve_merge() 참고.
+LOCAL_CURVE_MACRO_CHORD_M = LOCAL_CURVE_MACRO_SAMPLE * LOCAL_CURVE_DISTANCE_INTERVAL * 2
 # [307차 계측, NEEDS_VALIDATION] 306차가 확정한 min_points=2 게이트의
 # 구조적 취약점(고립된 1포인트 좁은 커브가 노이즈로 오인되어 제거될 수
 # 있음)을 실차 로그로 검증하기 위한 설계안 A(시간적 continuity 승격)
@@ -629,7 +636,23 @@ def route_local_curve_merge(orphans, distances, speeds, curvatures,
 
     local_used = False
     for ws, we in merged_windows:
-        local_path = route_crop_path_by_distance(relative_coords, ws, we)
+        # [329차] 328차는 국소 재계산의 "context"(macro chord 계산에
+        # 필요한 원본 경로 구간)와 "replacement"(10m 결과를 실제로
+        # 대체하는 구간)를 동일하게 [ws,we](=80m, WINDOW_BACK_M+FWD_M)로
+        # 취급했다. 그런데 macro chord 자체가 80m(=2*MACRO_SAMPLE*
+        # DISTANCE_INTERVAL)이라 window 폭과 정확히 같아 여유(margin)가
+        # 0이 되고, route_curvature_macro_fine()이 만들 수 있는 출력이
+        # 이론상/실측상(x18seg 3645프레임 재생, devnotes WIP 329차)
+        # 거의 항상 1개 점으로 축약됐다(45.5%는 그 1개조차 못 만들어
+        # fallback). distance_offset=ws(기존 라벨링 관례, p1=macro
+        # chord 시작점)와 replacement 범위(ws,we)는 그대로 두고, crop
+        # 범위만 뒤쪽으로 MACRO_CHORD_M(=80m)만큼 넓혀 p1이 we까지
+        # 가더라도 p3(=p1+80m)가 항상 context 안에 들어오게 한다.
+        # route_crop_path_by_distance()가 d_end를 total_len으로
+        # clamp하므로 path 끝 근처에서는 자동으로 좁은 context로
+        # 수렴한다(아래 tail 부분복원이 그 잔여 구간을 처리).
+        local_path = route_crop_path_by_distance(
+            relative_coords, ws, we + LOCAL_CURVE_MACRO_CHORD_M)
         if len(local_path) < 2:
             # [328차] window이 path 시작/끝단에 가까워 crop 결과가 1m
             # 미만/포인트부족으로 비게 되는 경우 -- 아래 두 fallback과
@@ -674,6 +697,22 @@ def route_local_curve_merge(orphans, distances, speeds, curvatures,
         out_c.extend(l_curv)
         out_ft.extend(l_ft)
         local_used = True
+
+        # [329차] context 확장이 path 끝단에서 clamp되면(총 길이가
+        # we+LOCAL_CURVE_MACRO_CHORD_M에 못 미치면) 국소 출력의 마지막
+        # 점이 we에 못 미칠 수 있다(x18seg 실측 946/3633프레임에서 관측,
+        # gap 최대 52.5m). 이 구간을 빈 채로 두면 제거는 [ws,we] 전체인데
+        # 대체는 일부만 되어 조용한 데이터 손실이 된다(위 len(local_path)<2
+        # 분기와 동일 성격의 문제, §28) -- 커버 안 된 꼬리 구간
+        # (max(l_dist), we]는 원본 10m 포인트로 부분 복원한다.
+        covered_max = max(l_dist)
+        if covered_max < we - 1e-6:
+            for i, d in enumerate(distances):
+                if covered_max < d <= we:
+                    out_d.append(d)
+                    out_s.append(speeds[i])
+                    out_c.append(curvatures[i])
+                    out_ft.append(fine_triggered[i])
 
     if not local_used:
         return distances, speeds, curvatures, fine_triggered, False
