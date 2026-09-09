@@ -1669,27 +1669,34 @@ class CarrotMan:
                 self.carrot_serv.route_apex_speed = apex_speed
 
                 if self.route_active:
-                    # [247차 design doc §5] ACTIVE 해제 조건(OR) -- (1) vEgo가
-                    # 목표속도*ROUTE_ACTIVE_RELEASE_MARGIN_RATIO(1.1) 이하로
-                    # 떨어졌거나, (2) continuity가 이전에 추적하던 apex의
-                    # lock을 놓치고 'new'(다른/다음 apex 재탐색)로 전이했다
-                    # -- §10이 정의하는 predicted_dist<=0(Apex 통과 추정) 시
-                    # continuity 내부에서 즉시 lock을 해제하므로, 그 결과로
-                    # 나타나는 'new' 전이 자체가 "이전 apex를 통과했다"는
-                    # 판정과 동치다(호출부에서 이 프레임의 apex_mode로 감지).
+                    # [247차 design doc §5, 343차 수정] ACTIVE 해제 조건(OR) --
+                    # (1) continuity가 이전에 추적하던 apex의 lock을 놓치고
+                    # 'new'(다른/다음 apex 재탐색)로 전이했다 -- §10이 정의하는
+                    # predicted_dist<=0(Apex 통과 추정) 시 continuity 내부에서
+                    # 즉시 lock을 해제하므로, 그 결과로 나타나는 'new' 전이
+                    # 자체가 "이전 apex를 통과했다"는 판정과 동치다(호출부에서
+                    # 이 프레임의 apex_mode로 감지).
                     # [255차] apex_mode가 "new"뿐 아니라 "passed"/"lost"도
                     # 동일하게 취급(위 continuity 6-state 분리 참고) --
                     # 세 값 모두 "이전에 추적하던 apex의 continuity를
                     # 잃었다"는 동일한 의미이므로 release 판정 자체는
                     # 4-state 시절과 동일하게 유지된다(§27, 동작 무변경).
                     apex_passed_or_lost = apex_mode in ("passed", "lost", "new")
-                    speed_reached = v_ego_kph <= apex_speed * ROUTE_ACTIVE_RELEASE_MARGIN_RATIO
+                    # [343차, 사용자 결정] speed_reached(vEgo<=apex_speed*
+                    # ROUTE_ACTIVE_RELEASE_MARGIN_RATIO) 조건을 이 OR-절에서
+                    # 삭제. v_ego_ms<=target_ms(아래 STEP2 else 분기, 및
+                    # INERT 게이트)는 그대로 유지 -- 342차/342차 계속 시뮬레이션
+                    # (sim_route_342_release_condition_removal.py)에서
+                    # speed_reached 단독 제거는 이 corpus 기준 accel_commanded
+                    # 0건으로 확인됐다(실차 검증은 미실시, §29). 상수
+                    # ROUTE_ACTIVE_RELEASE_MARGIN_RATIO 자체는 toolkit 스크립트
+                    # 다수가 import하므로 정의는 유지(§27 최소변경).
                     # [255차, 254차 design/사용자 확정] apex까지 남은 거리가
                     # ROUTE_RELEASE_DIST_M(20m) 이하면 목표속도 도달 여부와
                     # 무관하게 RELEASE -- 그 지점부터는 vturn이 근거리 커브
                     # 제어를 담당한다는 설계 결정(위 상수 선언부 주석 참고).
                     dist_reached = apex_dist is not None and apex_dist <= ROUTE_RELEASE_DIST_M
-                    if apex_passed_or_lost or speed_reached or dist_reached:
+                    if apex_passed_or_lost or dist_reached:
                         self.route_active = False
                         self.route_release_time = time.monotonic()
                         out_speed = None
