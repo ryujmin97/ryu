@@ -2236,11 +2236,13 @@ class CarrotMan:
         self.navd_active = True
         self._navi_route_source = "navd"  # [182차 계측]
 
-        # 경로수신 -> carrotman active되고 약간의 시간지연이 발생함..
-        if not from_navd:
-          self.carrot_serv.active_count = 80
-          self.carrot_serv.active_sdi_count = self.carrot_serv.active_sdi_count_max
-          self.carrot_serv.active_carrot = 2
+        # [357차 계속2] 원래 이 자리에 "if not from_navd: active_count=80/
+        # active_sdi_count/active_carrot=2" 블록이 있었으나, 이미 from_navd=True
+        # 블록 안이라 그 조건은 문법적으로 항상 False -- 100% 도달 불가능한
+        # dead code였음(356/357차 정적분석, 원격 HEAD 직접 확인으로 최종 확정).
+        # active_carrot 승격/유지는 carrot_serv.update()의 SDI 패킷 수신
+        # (UDP 7706, carrot_man_thread())이 전담하고 있어 이 블록이 실행됐어도
+        # 기능적 의존성이 없었음 -- 삭제.
 
         coords = [{"latitude": c.latitude, "longitude": c.longitude} for c in coords]
         #print("navdNaviPoints=", self.navi_points)
