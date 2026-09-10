@@ -353,9 +353,27 @@ class CarrotServ:
     # 规则：main_ko -> 韩语；main_zh-CHS -> 中文；其他 -> 英文
     self.lang = "en"
 
+    # [353차] update_params() 20Hz(update_navi() 매프레임) 무조건 호출 ->
+    # 18개 Params I/O 반복 실행 확인(352차 CPU 감사 후보①). carrot_man.py
+    # ::_refresh_cached_params()(99/100차)와 동일한 카운트다운 캐시 패턴
+    # 적용 -- 0으로 초기화해 아래 첫 update_params() 호출(이 __init__
+    # 시점)에서는 즉시 읽고, 이후 update_navi() 매 호출마다 100프레임
+    # (=5s, Ratekeeper(20) 기준)에 한 번만 재읽기.
+    self._readParamsServ = 0
+
     self.update_params()
 
   def update_params(self):
+    # [353차] 5s 캐시 게이트 -- 아래 18개 Params 읽기는 매 20Hz 프레임이
+    # 아니라 5s(100프레임)에 한 번만 실행된다. 전부 사용자 UI 설정값(실시간
+    # 센서/텔레메트리 아님, PARAMS_REGISTRY.md 대조 352차 확인)이라 5s
+    # 지연에 회귀 위험 없음 -- carrot_man.py의 IsOnroad/AutoCurveSpeed*
+    # 캐싱(99/100차)과 동일 근거.
+    self._readParamsServ -= 1
+    if self._readParamsServ > 0:
+      return
+    self._readParamsServ = 100
+
     self.autoNaviSpeedBumpSpeed = float(self.params.get_int("AutoNaviSpeedBumpSpeed"))
     self.autoNaviSpeedBumpTime = float(self.params.get_int("AutoNaviSpeedBumpTime"))
     self.autoNaviSpeedCtrlEnd = float(self.params.get_int("AutoNaviSpeedCtrlEnd"))
@@ -364,10 +382,17 @@ class CarrotServ:
     self.autoNaviSpeedDecelRate = float(self.params.get_int("AutoNaviSpeedDecelRate")) * 0.01
     self.autoNaviCountDownMode = self.params.get_int("AutoNaviCountDownMode")
     self.turnSpeedControlMode= self.params.get_int("TurnSpeedControlMode")
-    # [210차] 이 값을 곱하던 유일한 사용처(update_navi() route_speed 계산,
-    # 아래 L~1101 부근)를 제거함 -- 현재는 어디에서도 쓰이지 않는 죽은 값이다.
-    # UI 슬라이더("경로턴속도반영비율")와 params_keys.h 기본값은 그대로
-    # 남겨둠(최소변경 원칙, §27) -- 필요시 향후 재사용/제거는 별도 논의.
+    # [210차] 이 값을 곱하던 update_navi() 자체 내부 route_speed 계산
+    # 사용처(아래 L~1101 부근)는 제거됨.
+    # [353차 정정] 위 [210차] 주석의 "현재는 어디에서도 쓰이지 않는 죽은
+    # 값이다"는 stale/부정확한 서술이었음을 확인 -- carrot_man.py의
+    # route_curvature_macro_fine()/route_local_curve_merge() 호출부가
+    # self.carrot_serv.mapTurnSpeedFactor를 실제 인자로 계속 사용 중이며
+    # (279차 "V_CURVE_LOOKUP_VALS 결과에 곱함" 기록과 일치), CURRENT_STATUS.md
+    # 이월 항목(analysis_helpers.py 1.10 보정 필요)도 이 값이 production에서
+    # 살아있기 때문에 존재하는 항목이다. 따라서 이 read는 삭제 대상이
+    # 아니며, 다른 파라미터와 동일하게 5s 캐시 대상에만 포함한다(§27
+    # 최소변경 -- 산식/제어로직 변경 없음, 읽기 빈도만 변경).
     self.mapTurnSpeedFactor= self.params.get_float("MapTurnSpeedFactor") * 0.01
 
     self.autoTurnControlSpeedTurn = self.params.get_int("AutoTurnControlSpeedTurn")

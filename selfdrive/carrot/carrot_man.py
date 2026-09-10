@@ -829,6 +829,10 @@ class CarrotMan:
     self._is_onroad_cached = self.params.get_bool("IsOnroad")
     self._auto_curve_speed_factor = self.params.get_int("AutoCurveSpeedFactor") * 0.01
     self._auto_curve_speed_aggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness") * 0.01
+    # [353차] make_send_message()가 쓰는 캐시 필드 -- 101차 크래시 교훈
+    # (사용처보다 먼저 __init__에서 세팅해야 함, 위 주석 참고)과 동일하게
+    # 여기서 최초 1회 세팅.
+    self._version_cached = self.params.get("Version")
 
     self.carrot_curve_speed_params()
 
@@ -913,15 +917,19 @@ class CarrotMan:
 
   def _refresh_cached_params(self):
     # [99차/100차] 20Hz 루프 내 Params I/O 캐싱 -- 98차(controlsd.py 등)와
-    # 동일한 카운트다운 패턴. 이 3개 파라미터는 주행 중 실시간으로 바뀔
-    # 필요가 없는 설정값(온로드 상태/커브속도 튜닝 계수)이라 5s 지연은
-    # 회귀 위험 없음.
+    # 동일한 카운트다운 패턴. 이 파라미터들은 주행 중 실시간으로 바뀔
+    # 필요가 없는 설정값(온로드 상태/커브속도 튜닝 계수/빌드 버전)이라
+    # 5s 지연은 회귀 위험 없음.
+    # [353차] Version 추가 -- make_send_message()가 매 20Hz(remote_addr
+    # 연결 중엔 사실상 무조건, 352차 재분류)마다 raw self.params.get("Version")을
+    # 읽던 것을 여기 5s 캐시로 편입(빌드 버전은 재부팅 전까지 불변).
     self.readParams -= 1
     if self.readParams <= 0:
       self.readParams = 100
       self._is_onroad_cached = self.params.get_bool("IsOnroad")
       self._auto_curve_speed_factor = self.params.get_int("AutoCurveSpeedFactor") * 0.01
       self._auto_curve_speed_aggressiveness = self.params.get_int("AutoCurveSpeedAggressiveness") * 0.01
+      self._version_cached = self.params.get("Version")
 
   def get_broadcast_address(self):
     if PC:
@@ -1860,8 +1868,13 @@ class CarrotMan:
 
   def make_send_message(self):
     msg = {}
-    msg['Carrot2'] = self.params.get("Version")
-    isOnroad = self.params.get_bool("IsOnroad")
+    # [353차] 아래 2줄은 매 호출(사실상 20Hz, 352차 재분류)마다 raw
+    # Params I/O를 하던 것을 5s 캐시(_refresh_cached_params())로 전환.
+    # IsOnroad는 이미 존재하던 self._is_onroad_cached(99/100차)를 그대로
+    # 재사용(중복 read였음), Version은 이번에 신규로 같은 캐시 그룹에
+    # 편입. 값 자체의 의미/포맷은 변경 없음(§27).
+    msg['Carrot2'] = self._version_cached
+    isOnroad = self._is_onroad_cached
     msg['IsOnroad'] = isOnroad
     msg['CarrotRouteActive'] = self.navi_points_active
     msg['ip'] = self.ip_address
