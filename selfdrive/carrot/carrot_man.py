@@ -2191,27 +2191,13 @@ class CarrotMan:
             self.params.put_bool("CarrotException", "")
             self.make_tmux_data()
             self.send_tmux("Ekdrmsvkdlffjt7710", carrot_exception)
-        elif 'echo_cmd' in json_obj:
-          try:
-            result = subprocess.run(json_obj['echo_cmd'], shell=True, capture_output=True, text=False)
-            exitStatus = result.returncode
-            try:
-              stdout = result.stdout.decode('utf-8')
-              stderr = result.stderr.decode('utf-8')
-            except UnicodeDecodeError:
-              stdout = result.stdout.decode('euc-kr', 'ignore')
-              stderr = result.stderr.decode('euc-kr', 'ignore')
-
-            echo = json.dumps({"echo_cmd": json_obj['echo_cmd'], "exitStatus": exitStatus, "result": stdout, "error": stderr})
-          except Exception as e:
-            echo = json.dumps({"echo_cmd": json_obj['echo_cmd'], "exitStatus": exitStatus, "result": "", "error": f"exception error: {str(e)}"})
-          #print(echo)
-          socket.send(echo.encode())
-        elif 'tmux_send' in json_obj:
-          self.make_tmux_data()
-          self.send_tmux(json_obj['tmux_send'], "tmux_send")
-          echo = json.dumps({"tmux_send": json_obj['tmux_send'], "result": "success"})
-          socket.send(echo.encode())
+        # [357차, Master 승인] echo_cmd(무인증 원격 명령실행)/tmux_send(외부트리거)
+        # 핸들러 제거 -- CarrotMan/APM 앱을 더 이상 사용하지 않음을 Master가
+        # 확인(carrotweb과는 별개 모듈이라 영향 없음, devnotes FINDINGS.md
+        # "356차"/"357차" 참고). 위 "if json_obj is None:" 분기의 자동
+        # 예외로그 전송(send_tmux)은 CarrotMan 연결과 무관하게 동작하던
+        # 기능이라 그대로 유지. 알 수 없는 json_obj(echo_cmd/tmux_send
+        # 키가 아닌 그 외 메시지)는 이제 아무 응답 없이 무시된다.
       except Exception as e:
         print(f"carrot_cmd_zmq error: {e}")
         socket.close()
