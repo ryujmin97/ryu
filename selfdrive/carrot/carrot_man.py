@@ -370,26 +370,43 @@ def get_path_after_distance(start_index, coordinates, current_position, distance
     if closest_index != -1:
         path_after_distance.append(closest_point)
 
-        path_after_distance.append(coordinates[closest_index + 1])
-        total_distance = haversine(closest_point[0], closest_point[1], coordinates[closest_index + 1][0],
+        first_segment_distance = haversine(closest_point[0], closest_point[1], coordinates[closest_index + 1][0],
                                    coordinates[closest_index + 1][1])
 
-        # Traverse the path forward from the next point
-        for i in range(closest_index + 1, len(coordinates) - 1):
-            coord1 = coordinates[i]
-            coord2 = coordinates[i + 1]
-            segment_distance = haversine(coord1[0], coord1[1], coord2[0], coord2[1])
+        # [359차] 첫 세그먼트(closest_point -> coordinates[closest_index+1])가
+        # distance_m 캡 체크 없이 무조건 추가되던 버그. 직선 구간 등 raw
+        # waypoint 간격이 넓어 이 첫 세그먼트 자체가 이미 distance_m을
+        # 초과하면, 아래 루프의 remaining_distance가 음수가 되어 ratio가
+        # 음수 -> 경로가 반대 방향으로 반전(extrapolation)됨
+        # (FINDINGS.md 359차 참고). 첫 세그먼트도 나머지 세그먼트와 동일한
+        # 캡 로직을 적용해 정상 케이스(첫 세그먼트 < distance_m)는 기존과
+        # 동일하게 동작시킨다.
+        if first_segment_distance >= distance_m:
+            ratio = distance_m / first_segment_distance if first_segment_distance > 0 else 0
+            interpolated_lon = closest_point[0] + ratio * (coordinates[closest_index + 1][0] - closest_point[0])
+            interpolated_lat = closest_point[1] + ratio * (coordinates[closest_index + 1][1] - closest_point[1])
+            path_after_distance.append((interpolated_lon, interpolated_lat))
+            total_distance = distance_m
+        else:
+            path_after_distance.append(coordinates[closest_index + 1])
+            total_distance = first_segment_distance
 
-            if total_distance + segment_distance >= distance_m and segment_distance > 0:
-                remaining_distance = distance_m - total_distance
-                ratio = remaining_distance / segment_distance
-                interpolated_lon = coord1[0] + ratio * (coord2[0] - coord1[0])
-                interpolated_lat = coord1[1] + ratio * (coord2[1] - coord1[1])
-                path_after_distance.append((interpolated_lon, interpolated_lat))
-                break
+            # Traverse the path forward from the next point
+            for i in range(closest_index + 1, len(coordinates) - 1):
+                coord1 = coordinates[i]
+                coord2 = coordinates[i + 1]
+                segment_distance = haversine(coord1[0], coord1[1], coord2[0], coord2[1])
 
-            total_distance += segment_distance
-            path_after_distance.append(coord2)
+                if total_distance + segment_distance >= distance_m and segment_distance > 0:
+                    remaining_distance = distance_m - total_distance
+                    ratio = remaining_distance / segment_distance
+                    interpolated_lon = coord1[0] + ratio * (coord2[0] - coord1[0])
+                    interpolated_lat = coord1[1] + ratio * (coord2[1] - coord1[1])
+                    path_after_distance.append((interpolated_lon, interpolated_lat))
+                    break
+
+                total_distance += segment_distance
+                path_after_distance.append(coord2)
 
     return path_after_distance, start_index, closest_point
 
