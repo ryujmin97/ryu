@@ -167,6 +167,29 @@ ROUTE_MAX_SPEED_KPH = 150.0
 # 발견 시 2.0으로 즉시 복원 가능하도록 상수/분기 구조 자체는 손대지 않음.
 ROUTE_RELEASE_HOLD_S = 0.0
 
+# [370차, Master 결정 B3, devnotes WIP.md/FINDINGS.md 370차 참고] L1807
+# (INERT, v_ego_ms<=target_ms) 조건이 apex 후보의 grid-경계 전환 시
+# apex_speed가 순간적으로 튀는 것만으로 1프레임 True->False->True로
+# 토글해 route가 그 1프레임만 arbitration에서 빠졌다 복귀하는 현상
+# (368/369차 실차 corpus 실측 135+116=251건, L1807 단독 격리 재현
+# 218건)의 근본 수정. 두 후보(A=값 기반 margin, B=시간 기반 hold)를
+# 검토, 스파이크 크기가 케이스마다 다름(341차 x20seg +1.6~+5.6kph vs
+# 369차 근거리 corpus +8.1kph)이 확인돼 고정 margin(A)은 기각, 크기
+# 무관 필터인 시간 기반 hold(B)로 결정. 그중 hold=4프레임=0.20s(B3)를
+# 채택 -- run-length 분포(원 조건이 1~3프레임만 지속되는 요동이 전체
+# 381 run 중 85%/322건)로 hold=2/3(46건의 2~3프레임 요동을 이미
+# "확정 전환"으로 오인해 통과시켰을 것)보다 hold=4가 뚜렷이 넓은
+# 노이즈 대역을 걸러낸다는 정량적 근거를 확보(370차, toolkit/
+# diag_required_decel_341.py --hold-frames=4로 검증: 1프레임 토글
+# 218건 -> 0건, 100% 제거). 게이트 산식 자체(아래 carrot_navi_route()
+# INERT 분기)는 전혀 바꾸지 않고, 그 입력이 되는 raw bool만 이
+# 디바운스를 거치도록 삽입 지점 한 곳만 변경한다(§27 최소변경,
+# _route_apply_l1807_hold() 참고). **NEEDS_VALIDATION** -- 이 검증은
+# L1807 단독 격리 재현(오프라인 근사)이며 실제 커브 진입 시 hold로
+# 인한 0.20s 반응지연의 체감 부작용은 341차 원 corpus(x20seg)로 아직
+# 검증되지 않음(§29 실차 검증 아님, 다음 세션 최우선 후보).
+ROUTE_L1807_HOLD_FRAMES = 4
+
 # [247차, design doc §5] ACTIVE 해제 조건 중 하나 -- vEgo가 목표속도의 이
 # 비율 이하로 떨어지면(=사실상 목표속도 도달) 즉시 RELEASE한다. 나머지
 # 해제 조건(Apex 통과)은 아래 continuity 추적의 predicted_dist<=0으로
@@ -926,6 +949,18 @@ class CarrotMan:
     # carrot_serv.py 클램프도 route_inert 참조 없이 route_active만으로
     # 단순화됨(§8, 아래 carrot_serv.py 동일 patch 참고).
     self.route_release_time = None
+    # [370차, Master 결정 B3] L1807 hold=4프레임(0.20s) 디바운스 상태
+    # (위 ROUTE_L1807_HOLD_FRAMES 선언부 주석 참고). _route_l1807_hold_stable
+    # 은 None이면 아직 첫 프레임 미확정(첫 raw 값으로 즉시 확정), 그
+    # 외에는 마지막으로 확정된 L1807 raw bool. pending_val/len은 확정
+    # 상태와 다른 raw 값이 몇 프레임 연속 관측 중인지 카운트한다(toolkit/
+    # diag_required_decel_341.py apply_hold()와 동일 알고리즘). 이 분기가
+    # 평가되지 않는 프레임(ACTIVE 중이거나 apex 자체가 없음)에서는
+    # _route_apply_l1807_hold()가 호출되지 않아 아래 세 값이 그대로
+    # 보존된다(toolkit이 raw=None 프레임을 건너뛰는 것과 동일 의미).
+    self._route_l1807_hold_stable = None
+    self._route_l1807_hold_pending_val = None
+    self._route_l1807_hold_pending_len = 0
     # [247차/251차, design doc §10] apex continuity 추적기 상태(공간
     # 클러스터링 + 예측거리 매칭) -- 245차 debounce
     # (_route_candidate_lost_frames/ROUTE_RELEASE_CONFIRM_FRAMES)를 대체.
@@ -1213,6 +1248,34 @@ class CarrotMan:
       self._route_prov_streak = 1
       return True, distances[idx], speeds[idx], 1, 0.0, (1 >= PROVISIONAL_PROMOTE_STREAK)
     return False, 0.0, 0.0, 0, 0.0, False
+
+  def _route_apply_l1807_hold(self, raw_bool):
+    """[370차, Master 결정 B3] L1807(INERT, v_ego_ms<=target_ms) raw bool을
+    ROUTE_L1807_HOLD_FRAMES(4프레임=0.20s) 디바운스한 확정값으로 바꾼다.
+    raw_bool이 현재 확정 상태(_route_l1807_hold_stable)와 다르게
+    ROUTE_L1807_HOLD_FRAMES 프레임 연속으로 관측돼야 실제 전환하고,
+    그 전까지는 직전 확정 상태를 그대로 반환한다(toolkit/
+    diag_required_decel_341.py apply_hold()와 동일 알고리즘, devnotes
+    WIP.md 370차 오프라인 검증 참고). 게이트 산식 자체는 건드리지 않고
+    입력 bool 하나만 이 함수를 거치도록 삽입 지점을 한 곳으로 한정한다
+    (§27 최소변경)."""
+    if self._route_l1807_hold_stable is None:
+      self._route_l1807_hold_stable = raw_bool
+      return self._route_l1807_hold_stable
+    if raw_bool == self._route_l1807_hold_stable:
+      self._route_l1807_hold_pending_val = None
+      self._route_l1807_hold_pending_len = 0
+      return self._route_l1807_hold_stable
+    if raw_bool == self._route_l1807_hold_pending_val:
+      self._route_l1807_hold_pending_len += 1
+    else:
+      self._route_l1807_hold_pending_val = raw_bool
+      self._route_l1807_hold_pending_len = 1
+    if self._route_l1807_hold_pending_len >= ROUTE_L1807_HOLD_FRAMES:
+      self._route_l1807_hold_stable = raw_bool
+      self._route_l1807_hold_pending_val = None
+      self._route_l1807_hold_pending_len = 0
+    return self._route_l1807_hold_stable
 
   def carrot_navi_route(self):
 
@@ -1804,7 +1867,18 @@ class CarrotMan:
                     eff_apex_speed = apex_confidence * apex_speed + (1.0 - apex_confidence) * v_ego_kph
                     target_ms = eff_apex_speed / 3.6
                     eff_dist = max(0.0, apex_dist - target_ms * self.carrot_serv.autoNaviSpeedCtrlEnd)
-                    if v_ego_ms <= target_ms:
+                    # [370차, Master 결정 B3] raw 조건(v_ego_ms<=target_ms)을
+                    # 그대로 쓰지 않고 ROUTE_L1807_HOLD_FRAMES(4프레임=0.20s)
+                    # 디바운스를 거친 확정값으로 판정한다 -- grid-경계
+                    # apex_speed 스파이크가 이 raw 조건만 1프레임 True로
+                    # 튀게 만들어 route가 그 프레임만 arbitration에서
+                    # 빠졌다 복귀하는 토글(368/369차 실차 corpus 251건)을
+                    # 제거하기 위함(위 ROUTE_L1807_HOLD_FRAMES 선언부 주석,
+                    # _route_apply_l1807_hold() 참고). 아래 세 분기의 게이트
+                    # 산식 자체는 전혀 바꾸지 않았다(§27 최소변경).
+                    l1807_raw = v_ego_ms <= target_ms
+                    l1807_held = self._route_apply_l1807_hold(l1807_raw)
+                    if l1807_held:
                         # [257차] 이미 target 이하 -- 감속 자체가 무의미하므로
                         # 항상 INERT(None) 유지. 226차 ceiling(out=apex_speed)은
                         # Master 결정으로 폐기(257차 시뮬레이션: 동적 재평가
