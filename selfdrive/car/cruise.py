@@ -1,4 +1,5 @@
 import math
+import time
 import numpy as np
 
 from cereal import car
@@ -13,6 +14,9 @@ GearShifter = structs.CarState.GearShifter
 # V_CRUISE's are in kph
 V_CRUISE_MIN = 8
 V_CRUISE_MAX = 145
+
+# 358차 E': carrotMan 0Hz staleness 로컬 체크(controlsd.py 참고, 동일 값)
+CARROT_MAN_STALE_S = 1.5
 V_CRUISE_UNSET = 255
 V_CRUISE_INITIAL = 40
 V_CRUISE_INITIAL_EXPERIMENTAL_MODE = 105
@@ -288,7 +292,8 @@ class VCruiseCarrot:
       self.autoCruiseControl_cancel_timer = max(0, self.autoCruiseControl_cancel_timer - 1)
 
     CC = sm['carControl']
-    if sm.alive['carrotMan']:
+    carrotman_fresh = sm.recv_time['carrotMan'] > 0 and (time.monotonic() - sm.recv_time['carrotMan']) < CARROT_MAN_STALE_S
+    if carrotman_fresh:
       carrot_man = sm['carrotMan']
       self.nRoadLimitSpeed = carrot_man.nRoadLimitSpeed
       self.desiredSpeed = carrot_man.desiredSpeed

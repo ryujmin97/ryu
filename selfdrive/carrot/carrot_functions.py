@@ -12,6 +12,9 @@ from openpilot.selfdrive.selfdrived.events import Events
 EventName = log.OnroadEvent.EventName
 LaneChangeState = log.LaneChangeState
 
+# 358차 E': carrotMan 0Hz staleness 로컬 체크(controlsd.py 참고, 동일 값)
+CARROT_MAN_STALE_S = 1.5
+
 class XState(Enum):
   lead = 0
   cruise = 1
@@ -439,7 +442,8 @@ class CarrotPlanner:
 
   def _update_carrot_man(self, sm, v_ego_kph, v_cruise_kph):
     atc_active = False
-    if sm.alive['carrotMan']:
+    carrotman_fresh = sm.recv_time['carrotMan'] > 0 and (time.monotonic() - sm.recv_time['carrotMan']) < CARROT_MAN_STALE_S
+    if carrotman_fresh:
       carrot_man = sm['carrotMan']
       atc_turn_left = carrot_man.atcType in ["turn left", "atc left"]
       trigger_start = self.carrot_stay_stop = False

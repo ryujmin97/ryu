@@ -17,6 +17,10 @@ from collections import deque
 TRAJECTORY_SIZE = 33
 CAMERA_OFFSET = 0.04
 
+# 358차 E': carrotMan 0Hz staleness 로컬 체크(controlsd.py CARROT_MAN_STALE_S
+# 참고, 동일 값 사용, 별도 공유 모듈 신설 없이 최소변경 원칙에 따라 로컬 정의)
+CARROT_MAN_STALE_S = 1.5
+
 
 PATH_COST = 1.0
 LATERAL_MOTION_COST = 0.11
@@ -98,7 +102,8 @@ class LateralPlanner:
     v_ego_car = max(sm['carState'].vEgo, MIN_SPEED)
     speed_kph = v_ego_car * 3.6
     self.v_ego = v_ego_car
-    self.curve_speed = sm['carrotMan'].vTurnSpeed
+    carrotman_fresh = sm.recv_time['carrotMan'] > 0 and (time.monotonic() - sm.recv_time['carrotMan']) < CARROT_MAN_STALE_S
+    self.curve_speed = sm['carrotMan'].vTurnSpeed if carrotman_fresh else 0.0
 
     # Parse model predictions
     md = sm['modelV2']

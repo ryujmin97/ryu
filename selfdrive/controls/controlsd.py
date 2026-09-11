@@ -37,6 +37,15 @@ LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 
+# 358차: carrotMan은 0Hz on_demand 등록이라 SubMaster.alive['carrotMan']이
+# 구조적으로 상시 True(freq_ok/alive 판정이 static_freq_services 기준이라
+# 0Hz 서비스는 항상 통과). 실제 정지(예: broadcast_version_info() 예외 후
+# sleep(1))를 감지하려면 recv_time 기반 로컬 freshness 체크가 필요(E',
+# capnp/services.py 변경 없음). 1.5s는 실차 sleep(1) 발현 corpus 확보 전
+# provisional threshold(정상 gap 실측 max 0.086s와 충분히 분리됨, 1.0s는
+# sleep(1) 복구 지연과 경계가 겹쳐 회피).
+CARROT_MAN_STALE_S = 1.5
+
 
 def smooth_value(val, prev_val, tau):
   alpha = 1 - np.exp(-DT_CTRL / tau) if tau > 0 else 1
@@ -188,7 +197,8 @@ class Controls:
 
     # Steering PID loop and lateral MPC
     lat_plan = self.sm['lateralPlan']
-    curve_speed_abs = abs(self.sm['carrotMan'].vTurnSpeed)
+    carrotman_fresh = self.sm.recv_time['carrotMan'] > 0 and (time.monotonic() - self.sm.recv_time['carrotMan']) < CARROT_MAN_STALE_S
+    curve_speed_abs = abs(self.sm['carrotMan'].vTurnSpeed) if carrotman_fresh else 0.0
     self.lanefull_mode_enabled = (lat_plan.useLaneLines and curve_speed_abs > self._use_lane_line_curve_speed)
     lat_smooth_seconds = self._lat_smooth_seconds
     steer_actuator_delay = self._steer_actuator_delay_param
@@ -261,7 +271,8 @@ class Controls:
     CC.cruiseControl.override = CC.enabled and not CC.longActive and self.CP.openpilotLongitudinalControl
     CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
 
-    desired_kph = min(CS.vCruiseCluster, self.sm['carrotMan'].desiredSpeed)
+    carrotman_fresh = self.sm.recv_time['carrotMan'] > 0 and (time.monotonic() - self.sm.recv_time['carrotMan']) < CARROT_MAN_STALE_S
+    desired_kph = min(CS.vCruiseCluster, self.sm['carrotMan'].desiredSpeed) if carrotman_fresh else CS.vCruiseCluster
     setSpeed = float(desired_kph * CV.KPH_TO_MS)
     speeds = self.sm['longitudinalPlan'].speeds
     if len(speeds):

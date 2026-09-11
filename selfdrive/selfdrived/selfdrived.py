@@ -41,6 +41,9 @@ SafetyModel = car.CarParams.SafetyModel
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
+# 358차 E': carrotMan 0Hz staleness 로컬 체크(controlsd.py 참고, 동일 값)
+CARROT_MAN_STALE_S = 1.5
+
 
 class SelfdriveD:
   def __init__(self, CP=None):
@@ -248,7 +251,8 @@ class SelfdriveD:
       device_pose = Pose.from_live_pose(self.sm['livePose'])
       self.calibrated_pose = self.pose_calibrator.build_calibrated_pose(device_pose)
 
-    if self.sm.alive['carrotMan']:
+    carrotman_fresh = self.sm.recv_time['carrotMan'] > 0 and (time.monotonic() - self.sm.recv_time['carrotMan']) < CARROT_MAN_STALE_S
+    if carrotman_fresh:
       atc_type = self.sm['carrotMan'].atcType
       if atc_type != self.atc_type_last:
         if "prepare" not in atc_type and "prepare" in self.atc_type_last: # fork left/right prepare -> fork left/right
