@@ -78,6 +78,21 @@ ROUTE_CURVE_NEGLIGIBLE_THRESHOLD = 0.001
 # 필드가 이미 발행 중이었는데 extract_log.py가 뽑지 않았던 것).
 ROUTE_CURVATURE_FINE_SAMPLE = 1
 
+# [367차 계속4 신규] 고속도로 원거리(>=150m) 완만한 커브에서 fine(10m)
+# 서브샘플이 macro(40m)보다 낮은 속도로 계산되면 앞뒤 정합성 확인 없이
+# 무조건 채택하던 것(362차가 근본원인으로 확정)이 오탐(route=만 70~80
+# 표시, 실제 커브 없음)의 원인이었다. 사용자 제보 corpus(`d1cd25bdf1`
+# seg10/11/13)로 확정된 오탐 2건은 apexDist=210.0m(2건 모두), 반면
+# 별도 corpus(`2cbdaca9d2`)에서 qcamera로 직접 확인한 진짜 커브 2건은
+# apexDist=50m/120m -- 표본 4건 기준 150~180m를 후보 구간으로 보고
+# 150m를 1차 값으로 채택(진짜 커브 오억제 위험을 줄이는 보수적 선택,
+# NEEDS_VALIDATION -- 363/366차 TP corpus(R<30m, 1137건)의 apexDist
+# 분포로 추가 보강 필요). distances[j]는 route_curvature_macro_fine()
+# 양쪽 호출부(10m main / 2.5m local) 모두에서 차량 현재위치 기준 절대
+# 거리로 일관됨(362차 계속2 확인)이라, 이 상수 하나로 두 경로 모두에
+# 자동 적용된다(§27).
+ROUTE_FINE_OVERRIDE_MIN_DIST_M = 150.0
+
 # [196차, 179차후속2 게이트 폐기] 179차후속2가 도입했던 상대적 심각도
 # 게이트(ROUTE_APEX_RELATIVE_SEVERITY_RATIO, 아래 carrot_navi_route()
 # 참고)를 제거했다. 연속곡선을 1차->2차 순서로 처리하는 설계(사용자
@@ -569,6 +584,11 @@ def route_curvature_macro_fine(resampled_points, distance_interval, sample,
                 f_speed = fine_speeds_arr[j]
                 if fine_abs_curv[j] < ROUTE_CURVE_NEGLIGIBLE_THRESHOLD:
                     f_speed = max(f_speed, road_limit_speed)
+                # [367차 계속4 신규] 원거리(>=150m) apex 후보는 fine 대체를
+                # 억제하고 macro(40m chord) 값을 그대로 유지 -- 근거리는
+                # 기존 로직 무변경(§27, 362차 원 문제 대응).
+                if distances[j] >= ROUTE_FINE_OVERRIDE_MIN_DIST_M:
+                    continue
                 if f_speed < speeds[j]:
                     speeds[j] = f_speed
                     curvatures[j] = f_curv
